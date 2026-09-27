@@ -58,6 +58,13 @@ Important behavior:
     and default Office OCR report in a separate directory.
     --log optionally mirrors terminal messages to a log file.
   - Ctrl-C cancels queued PDF pages and terminates OCR workers.
+  - PDF output is split into pages with "--- Page N ---" markers on both the
+    native (pdftotext) and OCR paths. If the PDF defines printed page labels
+    that differ from the physical page number (e.g. a handbook numbered
+    "3-12"), the marker shows both: "--- Page 150 (3-12) ---". Labels are read
+    with PyMuPDF or pypdf when either is installed; otherwise markers carry
+    only the physical number. --no-page-markers restores the old unmarked
+    native output (OCR output always keeps its markers).
 
 Dependencies:
   macOS: brew install poppler tesseract pandoc calibre libreoffice
@@ -138,6 +145,8 @@ Supplementary outputs:
   batchocr sources/ -o out/ --meta-dir out/_meta
   batchocr input.pdf -m
 """
+
+BATCHOCR_VERSION = "1.1.0"
 
 import argparse
 import concurrent.futures as cf
@@ -463,14 +472,52 @@ def ocr_one_page(pdf_path: Path, page_num: int, dpi: int, lang: str, tmp_root: P
         shutil.rmtree(td, ignore_errors=True)
 
 
-def native_extract_pdf(pdf_path: Path) -> str:
+def pdf_page_labels(pdf_path: Path) -> dict[int, str]:
+    """Printed page labels ("iv", "3-12", ...) keyed by 1-based physical page,
+    only for pages whose label differs from the physical number. Empty if the
+    PDF defines none or neither PyMuPDF nor pypdf is installed (both optional)."""
+    labels = []
+    try:
+        import pymupdf
+        with pymupdf.open(pdf_path) as doc:
+            labels = [page.get_label() for page in doc]
+    except ImportError:
+        try:
+            import pypdf
+            labels = list(pypdf.PdfReader(pdf_path).page_labels)
+        except ImportError:
+            return {}
+        except Exception:
+            return {}
+    except Exception:
+        return {}
+    return {i: lab for i, lab in enumerate(labels, start=1) if lab and lab != str(i)}
+
+
+def page_marker(page_num: int, labels: dict[int, str]) -> str:
+    label = labels.get(page_num)
+    return f"--- Page {page_num} ({label}) ---" if label else f"--- Page {page_num} ---"
+
+
+def native_extract_pdf(pdf_path: Path, page_markers: bool = True) -> str:
     result = subprocess.run(
         ["pdftotext", "-layout", str(pdf_path), "-"],
         capture_output=True,
         text=True,
         errors="replace",
     )
-    return result.stdout
+    if not page_markers:
+        return result.stdout
+    # pdftotext ends every page with a form feed, so the last split element is
+    # the (empty) remainder after the final page.
+    pages = result.stdout.split("\f")
+    if pages and not pages[-1].strip():
+        pages.pop()
+    labels = pdf_page_labels(pdf_path)
+    return "".join(
+        f"\n\n{page_marker(pn, labels)}\n\n{text.strip(chr(10))}\n"
+        for pn, text in enumerate(pages, start=1)
+    )
 
 
 def ocr_image(image_path: Path, lang: str) -> str:
@@ -747,6 +794,7 @@ def main():
     ap = argparse.ArgumentParser(
         description="Batch force-OCR / extract text from a mixed folder of source documents."
     )
+    ap.add_argument("--version", action="version", version=f"batchocr {BATCHOCR_VERSION}")
     ap.add_argument("inputs", type=Path, nargs="+",
                      help="one or more source files, or a single source directory")
     ap.add_argument("-o", "--output", type=Path, default=None,
@@ -777,6 +825,9 @@ def main():
                      help="always force full-page Tesseract OCR on every PDF page, bypassing "
                           "native-text-layer detection -- this was the old default, still the "
                           "better choice for garbled/scanned sources")
+    ap.add_argument("--no-page-markers", action="store_true",
+                    help="native-text PDFs: output pdftotext's text without '--- Page N ---' "
+                         "markers (the pre-1.1.0 behavior); OCR output always keeps them")
     ap.add_argument("--quality-threshold", type=float, default=0.75,
                      help="native-quality cutoff for hybrid mode (default 0.75)")
     ap.add_argument("--engine", action="append", default=[], metavar="FORMAT=ENGINE",
@@ -1207,7 +1258,7 @@ def main():
 
         if use_native:
             file_started = time.monotonic()
-            text = native_extract_pdf(pdf)
+            text = native_extract_pdf(pdf, page_markers=not args.no_page_markers)
             label = route_output(pdf, ".txt", text)
             manifest_entries[pdf] = (".pdf", pages, len(text.split()), text[:300].replace("\n", " "), label)
             print(f"[done, native] {pdf.name} -> {label} ({len(text)} chars, {pages} pages)"
@@ -1263,8 +1314,9 @@ def main():
 
                 if pending_counts[pdf] == 0:
                     full_text = ""
+                    labels = pdf_page_labels(pdf)
                     for pn in sorted(page_results[pdf]):
-                        full_text += f"\n\n--- Page {pn} ---\n\n{page_results[pdf][pn].strip()}\n"
+                        full_text += f"\n\n{page_marker(pn, labels)}\n\n{page_results[pdf][pn].strip()}\n"
                     label = route_output(pdf, ".txt", full_text)
                     pages_total = pdf_page_count(pdf)
                     manifest_entries[pdf] = (

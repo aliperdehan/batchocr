@@ -135,6 +135,14 @@ text is exact.
 | `.txt` `.md` | copied as-is | same |
 | anything else | reported as skipped, never guessed at | none |
 
+PDF output always marks page boundaries with `--- Page N ---`, whether the
+text came from the text layer or from OCR. If the PDF has printed page
+labels that differ from the physical page number, the marker shows both,
+for example `--- Page 150 (3-12) ---`. That lets you search a big handbook
+by the page numbers printed in it. Reading labels needs PyMuPDF or pypdf
+(`pip install pymupdf`), and both are optional. `--no-page-markers` turns
+the markers off for text-layer PDFs.
+
 When a format has more than one backend, `--engine` chooses:
 
 ```sh

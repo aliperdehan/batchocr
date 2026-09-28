@@ -2,6 +2,14 @@
 
 Newest first. History before 1.1.0 was not tracked.
 
+## 1.1.1 — 2026-09-29
+
+- Fixed `--save-images` on PPTX/DOCX: images were extracted into a `media/`
+  folder shared by every document in the output directory, so decks
+  overwrote each other's `image1.png` etc., and image OCR also scanned other
+  documents' images. Each document now gets its own `<stem>_media/` folder,
+  cleared before extraction.
+
 ## 1.1.0 — 2026-09-27
 
 - Native-text PDFs (the `pdftotext` path) now get the same `--- Page N ---`

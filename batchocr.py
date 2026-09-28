@@ -146,7 +146,7 @@ Supplementary outputs:
   batchocr input.pdf -m
 """
 
-BATCHOCR_VERSION = "1.1.0"
+BATCHOCR_VERSION = "1.1.1"
 
 import argparse
 import concurrent.futures as cf
@@ -655,9 +655,14 @@ def office_convert(source_path: Path, md_file: Path, pandoc_target: str,
                    save_images: bool) -> tuple[Path, Path]:
     """Convert a PPTX/DOCX to Markdown at exactly md_file; return its Markdown/media paths."""
     md_file.parent.mkdir(parents=True, exist_ok=True)
+    # Always a per-document directory. Sharing md_file.parent let pandoc's
+    # media/image1.png overwrite between decks, and OCR's rglob then picked up
+    # other documents' images.
     media_root = (
-        md_file.parent if save_images else md_file.parent / f".{md_file.stem}_media_tmp"
+        md_file.parent / f"{md_file.stem}_media" if save_images
+        else md_file.parent / f".{md_file.stem}_media_tmp"
     )
+    shutil.rmtree(media_root, ignore_errors=True)  # drop stale images from earlier runs
     media_root.mkdir(parents=True, exist_ok=True)
     source_format = source_path.suffix.lower().lstrip(".")
     targets = [

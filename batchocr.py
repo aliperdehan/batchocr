@@ -11,8 +11,17 @@ What it handles:
     disagree the whole layer is rejected. Native text comes out in reading
     order (PyMuPDF content-stream order when PyMuPDF is installed, plain
     pdftotext otherwise); --layout restores the old "pdftotext -layout" rows.
-    Use --full-ocr to force OCR on every page. -H/--hybrid is kept as a
-    harmless no-op for backward compatibility.
+    Use --full-ocr (or --ocr tesseract) to force OCR on every page, --ocr off
+    to never OCR, --ocr ocrmypdf to run OCRmyPDF first. -H/--hybrid is kept
+    as a harmless no-op for backward compatibility.
+  - PDF to Markdown: --to md (or -t md) writes .md with headings, emphasis,
+    lists, tables and math, using the same per-page routing; OCR pages get
+    their structure from Tesseract's layout data. Needs PyMuPDF (AGPL-3.0,
+    installed separately: pip install pymupdf) and the bundled m1ck4_pdfmd/
+    package (a pinned copy of M1ck4/pdfmd, MIT; see VENDORED.md). Pages start
+    with <!-- Page N --> comments (--no-page-markers drops them, --page-breaks
+    adds '---' rules); running headers/footers are removed from PDFs of 4+
+    pages; every page is checked so no detector can swallow its text.
   - Images (.png/.jpg/.jpeg/.tif/.tiff/.bmp/.pnm): OCRed directly with
     Tesseract, no rasterisation needed. A single image is treated like a
     single-page document. A directory of page images (page1.png, page2.png,
@@ -77,6 +86,7 @@ Dependencies:
   Pandoc and print a warning.
 
 Common commands:
+  batchocr paper.pdf --to md -o paper.md
   batchocr sources/ -o out/ --dpi 300 -a sources/parsed
   batchocr inbox/ -o text/ --quality-threshold 0.85 -a inbox/done
   batchocr sources/ -o out/ --quality-threshold 0.85
@@ -149,8 +159,10 @@ Supplementary outputs:
   batchocr input.pdf -m
 """
 
-BATCHOCR_VERSION = "1.2.0"
+BATCHOCR_VERSION = "1.2.1"
 
+EDGE_ZONE = 0.12             # top/bottom share of a page where running headers and footers live
+MIN_PAGES_HEADER_FOOTER = 4  # repeated header/footer removal needs at least this many pages
 MIN_PAGE_CHARS = 20          # fewer non-space characters than this = no usable text layer
 OCR_CHECK_MIN_OVERLAP = 0.3  # sampled-page word overlap below which the text layer is rejected
 
@@ -240,23 +252,50 @@ class Tee:
         return self.terminal.isatty()
 
 
+# tool -> (brew command, apt package); poppler and tesseract ship several tools each
+INSTALL_HINTS = {
+    "pdfinfo": ("brew install poppler", "apt install poppler-utils"),
+    "pdftoppm": ("brew install poppler", "apt install poppler-utils"),
+    "pdftotext": ("brew install poppler", "apt install poppler-utils"),
+    "tesseract": ("brew install tesseract", "apt install tesseract-ocr"),
+    "pandoc": ("brew install pandoc", "apt install pandoc"),
+    "ebook-convert": ("brew install --cask calibre", "apt install calibre"),
+    "soffice": ("brew install --cask libreoffice", "apt install libreoffice"),
+}
+
+
+def install_hint(missing: list) -> str:
+    """One 'brew ... / apt ...' line per distinct package behind the missing tools."""
+    lines = dict.fromkeys(INSTALL_HINTS[t] for t in missing if t in INSTALL_HINTS)
+    return "\n".join(f"  macOS: {brew}   Linux: sudo {apt}" for brew, apt in lines)
+
+
 def check_pdf_tools():
     """Hard requirement, checked only once we know the run actually has PDFs."""
-    needed = ["pdfinfo", "pdftoppm", "tesseract"]
+    needed = ["pdfinfo", "pdftoppm", "pdftotext", "tesseract"]
     missing = [t for t in needed if shutil.which(t) is None]
     if missing:
-        sys.exit(
-            f"Missing required tools: {', '.join(missing)}.\n"
-            "See the install instructions in this script's header."
-        )
+        sys.exit(f"Missing required tools: {', '.join(missing)}.\n{install_hint(missing)}")
 
 
 def check_image_tools():
     """Hard requirement, checked only once we know the run actually has images."""
     if shutil.which("tesseract") is None:
+        sys.exit(f"Missing required tool: tesseract.\n{install_hint(['tesseract'])}")
+
+
+def check_ocr_languages(lang: str):
+    """Tesseract returns nothing for a language pack it lacks; say so instead of writing empty files."""
+    result = subprocess.run(["tesseract", "--list-langs"], capture_output=True, text=True)
+    have = {l.strip() for l in result.stdout.splitlines()[1:]} if result.returncode == 0 else None
+    if have is None:
+        return
+    missing = [l for l in lang.split("+") if l and l not in have]
+    if missing:
         sys.exit(
-            "Missing required tool: tesseract.\n"
-            "See the install instructions in this script's header."
+            f"Tesseract has no language data for: {', '.join(missing)}.\n"
+            f"  macOS: brew install tesseract-lang   Linux: sudo apt install "
+            + " ".join(f"tesseract-ocr-{l}" for l in missing)
         )
 
 
@@ -265,22 +304,24 @@ def natural_sort_key(path: Path):
     return [int(tok) if tok.isdigit() else tok.lower() for tok in re.split(r"(\d+)", path.name)]
 
 
-def check_tools():
-    if shutil.which("pandoc") is None:
+def check_tools(need_pandoc: bool, need_calibre: bool, need_soffice: bool):
+    """Soft requirements: warn only for tools this run's inputs would actually use."""
+    if need_pandoc and shutil.which("pandoc") is None:
         print(
             "[warn] pandoc not found -- HTML/RTF/ODT files and Calibre fallback "
-            "will be unavailable.",
+            f"will be unavailable.\n{install_hint(['pandoc'])}",
             file=sys.stderr,
         )
-    if shutil.which("ebook-convert") is None:
+    if need_calibre and shutil.which("ebook-convert") is None:
         print(
             "[warn] ebook-convert not found -- supported ebook/comic files "
-            "will fall back to Pandoc when possible.",
+            f"will fall back to Pandoc when possible.\n{install_hint(['ebook-convert'])}",
             file=sys.stderr,
         )
-    if find_tool("soffice") is None and shutil.which("libreoffice") is None:
+    if need_soffice and find_tool("soffice") is None and shutil.which("libreoffice") is None:
         print(
-            "[warn] LibreOffice not found -- legacy Office formats will be skipped.",
+            "[warn] LibreOffice not found -- legacy Office formats will be skipped.\n"
+            + install_hint(["soffice"]),
             file=sys.stderr,
         )
 
@@ -546,7 +587,8 @@ def format_page_list(pages: list[int], limit: int = 12) -> str:
     return shown + (f" (+{len(pages) - limit} more)" if len(pages) > limit else "")
 
 
-def ocr_one_page(pdf_path: Path, page_num: int, dpi: int, lang: str, tmp_root: Path) -> str:
+def ocr_one_page(pdf_path: Path, page_num: int, dpi: int, lang: str, tmp_root: Path,
+                 tsv: bool = False) -> str:
     # tmp_root is a run-wide scratch directory owned by the parent process, so
     # that a forcibly-terminated worker (Ctrl-C) still gets its leftovers
     # swept up by the parent's cleanup instead of orphaning files in /tmp.
@@ -566,7 +608,7 @@ def ocr_one_page(pdf_path: Path, page_num: int, dpi: int, lang: str, tmp_root: P
         if not imgs:
             return ""
         result = subprocess.run(
-            ["tesseract", str(imgs[0]), "stdout", "-l", lang],
+            ["tesseract", str(imgs[0]), "stdout", "-l", lang] + (["tsv"] if tsv else []),
             capture_output=True,
             text=True,
         )
@@ -859,6 +901,340 @@ def process_office(source_path: Path, md_file_target: Path, pandoc_target: str,
             shutil.rmtree(media_root, ignore_errors=True)
 
 
+LIGATURES = {"ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl", "ﬃ": "ffi", "ﬄ": "ffl",
+             "ﬅ": "st", "ﬆ": "st"}
+OCR_MIN_CONF = 70            # mean word confidence under which an OCR line cannot be a heading
+OCR_HEADING_RATIO = 1.3      # an OCR line this much taller than the page median may be a heading
+PROSE_CELL_WORDS = 8         # a table cell this long is a sentence: the 'table' is really a paragraph
+MD_GUARD_TOLERANCE = 0.01    # share of a page's letters/digits a Markdown render may change
+
+
+def require_markdown_deps():
+    """Markdown mode needs PyMuPDF (AGPL-3.0, so installed separately, never bundled)."""
+    try:
+        import pymupdf
+    except ImportError:
+        sys.exit("PDF -> Markdown needs PyMuPDF (AGPL-3.0, installed separately): "
+                 "pip install pymupdf   (plain-text mode works without it)")
+    try:
+        import m1ck4_pdfmd  # noqa: F401
+    except ImportError as exc:
+        sys.exit(f"PDF -> Markdown: the vendored m1ck4_pdfmd package is missing or broken ({exc})")
+    return pymupdf
+
+
+def tsv_to_pagetext(tsv: str):
+    """Tesseract TSV -> PageText. One Block per Tesseract paragraph, in Tesseract's own
+    reading order; one Span per line. The median word height of a line stands in for font
+    size (robust to drop caps), quantised so only clearly taller lines (headings) differ
+    from body text; lines Tesseract is unsure about are flagged low_conf and never become headings."""
+    from m1ck4_pdfmd.models import Block, Line, PageText, Span
+
+    lines: dict = {}
+    page_h = 0
+    for row in tsv.splitlines()[1:]:
+        f = row.split("\t")
+        if len(f) >= 12 and int(f[0]) == 1:
+            page_h = int(f[9])
+        if len(f) < 12 or int(f[0]) != 5 or not f[11].strip():
+            continue
+        ln = lines.setdefault((int(f[2]), int(f[3]), int(f[4])),
+                              {"words": [], "h": [], "conf": [], "top": 10 ** 9, "bottom": 0})
+        ln["words"].append(f[11].strip())
+        ln["h"].append(int(f[9]))
+        ln["conf"].append(float(f[10]))
+        ln["top"] = min(ln["top"], int(f[7]))
+        ln["bottom"] = max(ln["bottom"], int(f[7]) + int(f[9]))
+    if not lines:
+        return PageText()
+
+    def median(xs):
+        xs = sorted(xs)
+        return xs[len(xs) // 2]
+
+    heights = {k: median(v["h"]) for k, v in lines.items()}
+    ref = [h for k, h in heights.items() if len(lines[k]["words"]) >= 2] or list(heights.values())
+    body_h = median(ref) or 1
+    blocks: dict = {}
+    for key, v in lines.items():
+        ratio = heights[key] / body_h
+        text = " ".join(v["words"])
+        starts_like_heading = text.lstrip("\"'\u201c\u2018([ ")[:1].isupper() or text[:1].isdigit()
+        big = ratio >= OCR_HEADING_RATIO and starts_like_heading
+        span = Span(text=text, size=11.0 * ratio if big else 11.0)
+        if sum(v["conf"]) / len(v["conf"]) < OCR_MIN_CONF:
+            span.low_conf = True
+        line = Line(spans=[span])
+        if page_h:
+            line.ymid = (v["top"] + v["bottom"]) / 2 / page_h
+        blocks.setdefault(key[:2], []).append(line)
+    return PageText(blocks=[Block(lines=ls) for ls in blocks.values()])
+
+
+def _edge_key(text: str) -> str:
+    """Line text with digits and punctuation removed: 'COLLISION CITY ... 92' and '... 93' match."""
+    return " ".join(re.sub(r"[\W\d_]+", " ", text.lower()).split())
+
+
+def strip_running_edges(pages):
+    """Remove running headers/footers: lines in the top or bottom 12% of the page whose wording
+    (page numbers ignored) repeats on at least 40% of the pages, and at least 3; alternating
+    left/right headers are covered by the 40%. Page-number-only lines in those zones go too.
+    A repeated line elsewhere on the page (table notes, form fields) is content and stays.
+    Lines in a clearly larger font than the body are headings and stay. Pages without line
+    geometry fall back to their first and last three lines.
+    Returns (pages, removed line texts)."""
+    from collections import Counter
+    from m1ck4_pdfmd.models import Block
+
+    def in_zone(ln, rank, n):
+        y = getattr(ln, "ymid", None)
+        return (y <= EDGE_ZONE or y >= 1 - EDGE_ZONE) if y is not None else (rank < 3 or rank >= n - 3)
+
+    def zone_lines(page):
+        flat = [(bi, li, ln) for bi, b in enumerate(page.blocks) for li, ln in enumerate(b.lines)
+                if ln.text().strip()]
+        sizes = sorted(sp.size for _, _, ln in flat for sp in ln.spans if sp.size > 0)
+        body = sizes[len(sizes) // 2] if sizes else 0
+        # a line set clearly larger than the body text is a heading, not a running header
+        return [(bi, li, ln) for rank, (bi, li, ln) in enumerate(flat)
+                if in_zone(ln, rank, len(flat))
+                and not (body and max((sp.size for sp in ln.spans), default=0) >= 1.25 * body)]
+
+    def edge_key(text):
+        k = _edge_key(text)
+        return k if len(re.sub(r"\W", "", k)) >= 3 else ""
+
+    zones = [zone_lines(page) for page in pages]
+    need = max(3, int(0.4 * len(pages) + 0.999))
+    seen = Counter(k for z in zones for k in {edge_key(ln.text()) for _, _, ln in z} - {""})
+    repeated = {k for k, n in seen.items() if n >= need}
+
+    removed = []
+    for page, z in zip(pages, zones):
+        drop = {(bi, li) for bi, li, ln in z
+                if edge_key(ln.text()) in repeated
+                or re.fullmatch(r"[\W_]{0,2}\d{1,3}[\W_]{0,2}", ln.text().strip())}
+        if drop:
+            removed.extend(page.blocks[bi].lines[li].text().strip() for bi, li in sorted(drop))
+            page.blocks = [
+                Block(lines=[ln for li, ln in enumerate(b.lines) if (bi, li) not in drop])
+                for bi, b in enumerate(page.blocks)
+            ]
+            page.blocks = [b for b in page.blocks if b.lines]
+    return pages, removed
+
+
+def dehyphenate(pages) -> int:
+    """Join words broken across lines ('per-' / 'formance'). A document that elsewhere spells
+    the word hyphenated ('twentieth-century') keeps the hyphen; otherwise it is dropped.
+    Lines are merged here so the renderer never sees a line-final hyphen. Returns joins made."""
+    from collections import Counter
+    vocab = Counter(w for page in pages for blk in page.blocks for ln in blk.lines
+                    for w in re.findall(r"\w+(?:-\w+)*", ln.text().lower()))
+    joins = 0
+    for page in pages:
+        for blk in page.blocks:
+            out = []
+            for ln in blk.lines:
+                prev = out[-1] if out else None
+                if prev is not None and prev.spans and ln.spans:
+                    ptxt = prev.text().rstrip()
+                    nxt = ln.spans[0].text.lstrip()
+                    left = re.search(r"([^\W\d_]+)-$", ptxt)
+                    right = re.match(r"([^\W\d_]+)", nxt)
+                    if left and right and nxt[:1].islower():
+                        lw, rw = left.group(1).lower(), right.group(1).lower()
+                        keep = vocab[f"{lw}-{rw}"] > vocab[lw + rw]
+                        tail = prev.spans[-1]
+                        tail.text = tail.text.rstrip()
+                        if not keep:
+                            tail.text = tail.text[:-1]
+                        first = ln.spans[0]
+                        first.text = first.text.lstrip()
+                        if (tail.bold, tail.italic) == (first.bold, first.italic):
+                            tail.text += first.text
+                            prev.spans.extend(ln.spans[1:])
+                        else:
+                            prev.spans.extend(ln.spans)
+                        joins += 1
+                        continue
+                out.append(ln)
+            blk.lines = out
+    return joins
+
+
+def pdf_page_pagetext(page):
+    """Native page -> PageText; each line also gets .ymid, its vertical centre as a share of the page height."""
+    from m1ck4_pdfmd.models import PageText
+    d = page.get_text("dict")
+    pt = PageText.from_pymupdf(d)
+    height = d.get("height") or 0
+    boxes = [ln["bbox"] for b in d.get("blocks", []) if "lines" in b for ln in b["lines"]
+             if any(sp.get("text") for sp in ln.get("spans", []))]
+    lines = [ln for blk in pt.blocks for ln in blk.lines]
+    if height and len(boxes) == len(lines):
+        for ln, bb in zip(lines, boxes):
+            ln.ymid = (bb[1] + bb[3]) / 2 / height
+    return pt
+
+
+def expand_ligatures(pages) -> None:
+    for page in pages:
+        for blk in page.blocks:
+            for ln in blk.lines:
+                for sp in ln.spans:
+                    if any(c in sp.text for c in LIGATURES):
+                        sp.text = "".join(LIGATURES.get(c, c) for c in sp.text)
+
+
+def _letters(text: str):
+    from collections import Counter
+    return Counter(c for c in text.lower() if c.isalnum())
+
+
+def _page_letters(page):
+    return _letters("".join(ln.text() for blk in page.blocks for ln in blk.lines))
+
+
+def prune_prose_tables(page) -> int:
+    """Un-table detections whose cells are sentences: a paragraph cut at wide word gaps is not a
+    table. A multi-block table drops its continuation marks too. Returns tables dropped."""
+    dropped = 0
+    for i, blk in enumerate(page.blocks):
+        grid = getattr(blk, "table_grid", None)
+        if not getattr(blk, "is_table", False) or not grid:
+            continue
+        cells = [c for row in grid for c in row if c.strip()]
+        if cells and sum(len(c.split()) >= PROSE_CELL_WORDS for c in cells) / len(cells) >= 0.2:
+            blk.is_table, blk.table_grid = False, None
+            for nxt in page.blocks[i + 1:]:
+                if not getattr(nxt, "table_continuation", False):
+                    break
+                nxt.table_continuation = False
+            dropped += 1
+    return dropped
+
+
+def render_page_guarded(base_page, body_size, options, render_document, verbose=0, label=""):
+    """Render one page, trying the table and math stages first and falling back to simpler
+    rendering when the output no longer contains the page's letters and digits. A page
+    never loses text to a detector: the least-changed attempt wins."""
+    import copy
+    from m1ck4_pdfmd import transform as T
+
+    want = _page_letters(base_page)
+    total = sum(want.values()) or 1
+    best = None
+    for stage, (tables, math) in enumerate(((True, True), (True, False), (False, False))):
+        page = copy.deepcopy(base_page)
+        if tables:
+            page = T.annotate_tables([page])[0]
+            prune_prose_tables(page)
+        if math:
+            T.annotate_math_on_page(page)
+        md = render_document([page], options, body_sizes=[body_size])
+        diff = sum(((want - _letters(md)) + (_letters(md) - want)).values()) / total
+        if best is None or diff < best[0]:
+            best = (diff, md, stage)
+        if diff <= MD_GUARD_TOLERANCE:
+            break
+    diff, md, stage = best
+    if verbose and (stage or diff > MD_GUARD_TOLERANCE):
+        print(f"[md] {label}: simplified rendering "
+              f"({['', 'no math', 'no tables or math'][stage]}), {diff:.1%} of characters differ")
+    return md, stage, diff
+
+
+def pages_to_markdown(pdf_path: Path, total: int, ocr_tsv: dict, page_limit: int | None, *,
+                      page_markers=True, page_breaks=False, verbose=0, native_pdf: Path | None = None):
+    """Whole-document Markdown. Pages in ocr_tsv (page -> Tesseract TSV) are OCR pages; every
+    other page is read from its native text layer (PyMuPDF), so a PDF may mix both."""
+    pymupdf = require_markdown_deps()
+    from m1ck4_pdfmd import transform as T
+    from m1ck4_pdfmd.models import Options
+    from m1ck4_pdfmd.render import render_document
+
+    pymupdf.TOOLS.mupdf_display_errors(False)
+    last = min(total, page_limit) if page_limit else total
+    pages = []
+    with pymupdf.open(native_pdf or pdf_path) as doc:
+        for pn in range(1, last + 1):
+            pages.append(tsv_to_pagetext(ocr_tsv[pn]) if pn in ocr_tsv
+                         else pdf_page_pagetext(doc[pn - 1]))
+    expand_ligatures(pages)
+    options = Options(defragment_short=False, insert_page_breaks=False)
+
+    pages = T.strip_drop_caps(pages)
+    removed = []
+    if len(pages) >= MIN_PAGES_HEADER_FOOTER:
+        pages, removed = strip_running_edges(pages)
+        if removed:
+            shown = "; ".join(dict.fromkeys(removed[:4]))
+            print(f"[md] removed {len(removed)} running header/footer/page-number line(s), e.g. {shown!r}")
+    dehyphenate(pages)
+    pages = T.merge_bullet_lines(pages)
+    body_sizes = T.estimate_body_size(pages)
+
+    labels = pdf_page_labels(pdf_path) if page_markers else {}
+    parts, simplified = [], 0
+    for pn, (page, body) in enumerate(zip(pages, body_sizes), start=1):
+        md, stage, _ = render_page_guarded(page, body, options, render_document,
+                                           verbose, f"page {pn}")
+        simplified += bool(stage)
+        head = []
+        if page_breaks and pn > 1:
+            head.append("---")
+        if page_markers:
+            head.append(page_marker_comment(pn, labels))
+        parts.append("\n\n".join(head + ([md.strip()] if md.strip() else [])))
+    text = re.sub(r"\n{3,}", "\n\n", "\n\n".join(p for p in parts if p)).strip() + "\n"
+    return text, {"pages": len(pages), "ocr_pages": len(ocr_tsv), "simplified": simplified,
+                  "removed_lines": len(removed)}
+
+
+def page_marker_comment(page_num: int, labels: dict) -> str:
+    label = labels.get(page_num)
+    return f"<!-- Page {page_num} ({label}) -->" if label else f"<!-- Page {page_num} -->"
+
+
+def markdown_stats(md: str) -> str:
+    lines = md.splitlines()
+    words = len(re.findall(r"\w+", md))
+    headings = sum(l.startswith("#") for l in lines)
+    tables = sum(1 for l in lines if re.match(r"\|[ :|-]+\|$", l) and "---" in l)
+    items = sum(1 for l in lines if re.match(r"(- |\d+\. )", l))
+    return f"{words} words, {headings} headings, {tables} tables, {items} list items"
+
+
+def run_ocrmypdf(pdf_path: Path, lang: str, tmp_root: Path) -> Path:
+    """Run OCRmyPDF over the whole PDF and return the OCRed copy (its text layer is then read natively)."""
+    exe = shutil.which("ocrmypdf")
+    if exe is None:
+        raise RuntimeError("--ocr ocrmypdf needs ocrmypdf (brew install ocrmypdf, or pipx install ocrmypdf)")
+    out = tmp_root / f"{pdf_path.stem}.ocr.pdf"
+    result = subprocess.run([exe, "--force-ocr", "-l", lang, str(pdf_path), str(out)],
+                            capture_output=True, text=True)
+    if result.returncode != 0 or not out.exists():
+        lines = (result.stderr or result.stdout).strip().splitlines()
+        raise RuntimeError(f"ocrmypdf failed: {lines[-1] if lines else 'no output'}")
+    return out
+
+
+def export_pdf_images(pdf_path: Path, md_path: Path, md_text: str, limit: int, args) -> str:
+    """Save the PDF's embedded images next to the Markdown and append references to them."""
+    if args.concat or args.stdout:
+        print("[warn] --export-images needs a real output file; ignored with --concat/--stdout",
+              file=sys.stderr)
+        return md_text
+    from m1ck4_pdfmd.models import Options
+    from m1ck4_pdfmd.pipeline import _append_image_refs, _export_images
+    mapping = _export_images(str(pdf_path), str(md_path),
+                             Options(export_images=True, preview_only=limit < pdf_page_count(pdf_path)),
+                             log_cb=lambda m: print(f"[md] {m}"))
+    return _append_image_refs(md_text, mapping) if mapping else md_text
+
+
 def parse_engine_overrides(specs: list, ap: argparse.ArgumentParser) -> dict:
     """Turn --engine FORMAT=ENGINE specs into an {extension: engine} map.
     FORMAT is a bare extension (docx, epub, cbz, ...) or a group alias:
@@ -922,6 +1298,28 @@ def main():
                      help="always force full-page Tesseract OCR on every PDF page, bypassing "
                           "native-text-layer detection -- this was the old default, still the "
                           "better choice for garbled/scanned sources")
+    ap.add_argument("-t", "--to", choices=["txt", "md"], default="txt",
+                     help="output format for PDFs: txt (default) or md (Markdown with headings, "
+                          "lists, tables and emphasis; needs PyMuPDF, installed separately). "
+                          "Other input types keep their usual output")
+    ap.add_argument("--ocr", choices=["off", "auto", "tesseract", "ocrmypdf"], default="auto",
+                     help="PDF OCR policy: auto (default) = per-page hybrid; off = never OCR; "
+                          "tesseract = OCR every page (same as --full-ocr); ocrmypdf = run "
+                          "OCRmyPDF first and read its text layer")
+    ap.add_argument("--export-images", action="store_true",
+                     help="Markdown output: save the PDF's images to <name>_assets/ and append "
+                          "references to them")
+    ap.add_argument("--page-breaks", action="store_true",
+                     help="Markdown output: put a '---' rule between pages")
+    ap.add_argument("--preview-only", action="store_true",
+                     help="PDFs: process only the first 3 pages")
+    ap.add_argument("--stats", action="store_true",
+                     help="Markdown output: print word/heading/table/list counts when done")
+    ap.add_argument("--no-progress", action="store_true", help="suppress [progress] lines")
+    ap.add_argument("--no-color", action="store_true", help="accepted for compatibility; output is never coloured")
+    ap.add_argument("-q", "--quiet", action="store_true", help="only errors and warnings on the terminal")
+    ap.add_argument("-v", "--verbose", action="count", default=0,
+                     help="more detail about page decisions (-v)")
     ap.add_argument("--layout", action="store_true",
                      help="native-text PDFs: use 'pdftotext -layout' (visual rows, the pre-1.2.0 "
                           "behavior) instead of reading-order extraction; keeps wide tables aligned "
@@ -931,7 +1329,8 @@ def main():
                           "PDF's text layer against what is actually printed on the page")
     ap.add_argument("--no-page-markers", action="store_true",
                     help="native-text PDFs: output pdftotext's text without '--- Page N ---' "
-                         "markers (the pre-1.1.0 behavior); OCR output always keeps them")
+                         "markers (the pre-1.1.0 behavior); OCR output always keeps them. "
+                         "Markdown output: drop the '<!-- Page N -->' comments")
     ap.add_argument("--quality-threshold", type=float, default=0.75,
                      help="native-quality cutoff for hybrid mode (default 0.75)")
     ap.add_argument("--engine", action="append", default=[], metavar="FORMAT=ENGINE",
@@ -963,11 +1362,11 @@ def main():
     ap.add_argument("--pandoc-to", default="markdown+tex_math_dollars",
                      help="preferred Pandoc target for PPTX/DOCX")
     args = ap.parse_args()
+    md_mode = args.to == "md"
+    failed_files = []
     if args.stdout and args.output is not None:
         sys.exit("--stdout/-s and -o/--output are mutually exclusive")
     engine_for = parse_engine_overrides(args.engine, ap)
-
-    check_tools()
 
     # --- resolve inputs: expand any shell-quoted glob patterns, keep literal
     # files/dirs as given. Every item here is checked to actually exist. ---
@@ -1143,6 +1542,8 @@ def main():
         # --log's Tee, if that's active) so real stdout carries only the text
         # written explicitly via sys.__stdout__ -- safe to pipe.
         sys.stdout = sys.stderr
+    if args.quiet:
+        sys.stdout = open(os.devnull, "w")  # real --stdout text goes through sys.__stdout__
 
     if is_dir_mode:
         # Natural (numeric-aware) sort so a folder of page images -- page2.png,
@@ -1172,10 +1573,18 @@ def main():
         else:
             other_files.append(f)
 
+    check_tools(
+        need_pandoc=bool(pandoc_files or office_files or calibre_files),
+        need_calibre=bool(calibre_files),
+        need_soffice=bool(libreoffice_files) or any(
+            engine_for.get(f.suffix.lower()) == "libreoffice" for f in office_files),
+    )
     if pdf_files:
         check_pdf_tools()
     if image_files:
         check_image_tools()
+    if pdf_files or image_files:
+        check_ocr_languages(args.lang)
 
     if other_files:
         print(f"[warn] {len(other_files)} file(s) have no registered handler and will be skipped:",
@@ -1203,6 +1612,7 @@ def main():
             except Exception as exc:
                 print(f"[warn] {f.name}: could not extract text; skipped ({exc})",
                       file=sys.stderr)
+                failed_files.append(f)
                 continue
             label = route_output(f, ".txt", text)
             if not text.strip():
@@ -1230,6 +1640,7 @@ def main():
             except Exception as exc:
                 print(f"[warn] {f.name}: could not extract text; skipped ({exc})",
                       file=sys.stderr)
+                failed_files.append(f)
                 continue
             label = route_output(f, ".txt", text)
             print(f"[done, {method}] {f.name} -> {label} ({len(text)} chars)"
@@ -1254,6 +1665,7 @@ def main():
                 except Exception as exc:
                     print(f"[warn] {f.name}: could not extract text; skipped ({exc})",
                           file=sys.stderr)
+                    failed_files.append(f)
                     continue
                 label = route_output(f, ".txt", text)
                 print(f"[done, LibreOffice] {f.name} -> {label} ({len(text)} chars)"
@@ -1336,9 +1748,12 @@ def main():
         archive_source(f, args.archive_dir)
 
     # --- PDFs ---
+    pdf_ext = ".md" if md_mode else ".txt"
+    if md_mode and pdf_files:
+        require_markdown_deps()
     pending_pdfs = []
     for pdf in pdf_files:
-        out_path = output_for(pdf, ".txt")
+        out_path = output_for(pdf, pdf_ext)
         if should_skip(out_path):
             print(f"[skip] {pdf.name} already has output (use --force to redo)")
             completed_sources.append(pdf)
@@ -1346,35 +1761,76 @@ def main():
             continue
         pending_pdfs.append(pdf)
 
+    def finish_pdf(pdf, pages, texts, tsv, started, kind, native_pdf=None):
+        """Assemble one PDF's output from its page results and send it where it belongs.
+        texts: {page: text} for native pages (plain text) -- tsv: {page: Tesseract TSV} for OCR pages."""
+        limit = min(pages, 3) if args.preview_only else pages
+        if md_mode:
+            text, st = pages_to_markdown(
+                pdf, pages, tsv, limit if args.preview_only else None,
+                page_markers=not args.no_page_markers, page_breaks=args.page_breaks,
+                verbose=args.verbose, native_pdf=native_pdf,
+            )
+            if args.export_images:
+                text = export_pdf_images(pdf, output_for(pdf, ".md"), text, limit, args)
+            if st["simplified"]:
+                print(f"[md] {pdf.name}: {st['simplified']} page(s) rendered without table/math "
+                      "detection to keep all their text")
+            if args.stats:
+                print(f"[stats] {pdf.name}: {markdown_stats(text)}")
+        else:
+            text = assemble_pages(pdf, {**texts, **tsv},
+                                  page_markers=bool(tsv) or not args.no_page_markers)
+        label = route_output(pdf, pdf_ext, text)
+        manifest_entries[pdf] = (".pdf", limit, len(text.split()), text[:300].replace("\n", " "), label)
+        print(f"[done, {kind}] {pdf.name} -> {label} ({len(text)} chars, {limit} pages)"
+              f" | time {format_duration(time.monotonic() - started)}")
+        completed_sources.append(pdf)
+        archive_source(pdf, args.archive_dir)
+
     tasks = []
     native_kept = {}  # pdf -> {page: native text} for pages that skip OCR
+    native_src = {}   # pdf -> PDF whose text layer supplies those pages (differs under --ocr ocrmypdf)
     run_tmp_root = Path(tempfile.mkdtemp(prefix="batchocr-run-"))
     for pdf in pending_pdfs:
         pages = pdf_page_count(pdf)
         if pages == 0:
-            print(f"[warn] {pdf.name}: pdfinfo reported 0 pages, skipping", file=sys.stderr)
+            print(f"[warn] {pdf.name}: pdfinfo reported 0 pages (encrypted or damaged?), skipping",
+                  file=sys.stderr)
+            failed_files.append(pdf)
             continue
+        if args.preview_only:
+            pages = min(pages, 3)
 
-        keep = {}
-        if not args.full_ocr:
+        file_started = time.monotonic()
+        keep, src = {}, pdf
+        if args.ocr == "ocrmypdf":
+            try:
+                src = run_ocrmypdf(pdf, args.lang, run_tmp_root)
+            except RuntimeError as exc:
+                print(f"[warn] {pdf.name}: {exc}; skipped", file=sys.stderr)
+                failed_files.append(pdf)
+                continue
+            keep = dict(enumerate(native_pages(src)[:pages], start=1))
+            print(f"[hybrid] {pdf.name}: OCRmyPDF text layer for all {pages} pages")
+        elif args.ocr == "off":
+            keep = dict(enumerate(native_pages(pdf, layout=args.layout)[:pages], start=1))
+            empty = [pn for pn, t in keep.items() if page_quality(t) < args.quality_threshold]
+            print(f"[hybrid] {pdf.name}: --ocr off, native text for all {pages} pages"
+                  + (f" ({len(empty)} without a usable text layer: {format_page_list(empty)})" if empty else ""))
+        elif not (args.full_ocr or args.ocr == "tesseract"):
             keep, note = plan_native_pages(
-                pdf, native_pages(pdf, layout=args.layout), args.quality_threshold,
+                pdf, native_pages(pdf, layout=args.layout)[:pages], args.quality_threshold,
                 args.lang, run_tmp_root, crosscheck=not args.no_ocr_check,
             )
             print(f"[hybrid] {pdf.name}: {note}")
         ocr_pages = [p for p in range(1, pages + 1) if p not in keep]
 
         if not ocr_pages:
-            file_started = time.monotonic()
-            text = assemble_pages(pdf, keep, page_markers=not args.no_page_markers)
-            label = route_output(pdf, ".txt", text)
-            manifest_entries[pdf] = (".pdf", pages, len(text.split()), text[:300].replace("\n", " "), label)
-            print(f"[done, native] {pdf.name} -> {label} ({len(text)} chars, {pages} pages)"
-                  f" | time {format_duration(time.monotonic() - file_started)}")
-            completed_sources.append(pdf)
-            archive_source(pdf, args.archive_dir)
+            finish_pdf(pdf, pages, keep, {}, file_started, "native", native_pdf=src)
         else:
             native_kept[pdf] = keep
+            native_src[pdf] = src
             for p in ocr_pages:
                 tasks.append((pdf, p, pages))
 
@@ -1384,9 +1840,11 @@ def main():
               f"{args.jobs or 'auto'} workers, {args.dpi} dpi, lang={args.lang}")
 
         pending_counts = {}
+        pdf_pages = {}
         for pdf, p, pages in tasks:
             pending_counts[pdf] = pending_counts.get(pdf, 0) + 1
-        page_results = {pdf: dict(native_kept[pdf]) for pdf in pending_counts}
+            pdf_pages[pdf] = pages
+        page_results = {pdf: {} for pdf in pending_counts}
 
         total = len(tasks)
         done = 0
@@ -1396,7 +1854,7 @@ def main():
         file_started = {pdf: batch_started for pdf in pending_counts}
         ex = cf.ProcessPoolExecutor(max_workers=args.jobs)
         future_map = {
-            ex.submit(ocr_one_page, pdf, p, args.dpi, args.lang, run_tmp_root): (pdf, p)
+            ex.submit(ocr_one_page, pdf, p, args.dpi, args.lang, run_tmp_root, md_mode): (pdf, p)
             for pdf, p, _ in tasks
         }
         try:
@@ -1406,10 +1864,11 @@ def main():
                     text = fut.result()
                 except Exception as e:
                     text = f"[OCR ERROR on page {p}: {e}]"
+                    failed_files.append(pdf)
                 page_results[pdf][p] = text
                 pending_counts[pdf] -= 1
                 done += 1
-                if done % 20 == 0 or done == total:
+                if (done % 20 == 0 or done == total) and not args.no_progress:
                     progress_batch_size = done - last_progress_done
                     progress_batch_time = time.monotonic() - last_progress_time
                     print(
@@ -1421,18 +1880,8 @@ def main():
                     last_progress_time = time.monotonic()
 
                 if pending_counts[pdf] == 0:
-                    full_text = assemble_pages(pdf, page_results[pdf])
-                    label = route_output(pdf, ".txt", full_text)
-                    pages_total = pdf_page_count(pdf)
-                    manifest_entries[pdf] = (
-                        ".pdf", pages_total, len(full_text.split()),
-                        full_text[:300].replace("\n", " "), label,
-                    )
-                    print(f"[done, OCR] {pdf.name} -> {label} ({len(full_text)} chars, {pages_total} pages)"
-                          f" | time {format_duration(time.monotonic() - file_started[pdf])}")
-                    completed_sources.append(pdf)
-                    archive_source(pdf, args.archive_dir)
-                    del page_results[pdf]
+                    finish_pdf(pdf, pdf_pages[pdf], native_kept[pdf], page_results.pop(pdf),
+                               file_started[pdf], "OCR", native_pdf=native_src[pdf])
         except KeyboardInterrupt:
             print(
                 f"\n[interrupt] stopping after {done}/{total} pages;"
@@ -1456,6 +1905,10 @@ def main():
     line_ranges = write_merged_output(concat_target, args.stdout and not single_file, concat_entries, all_files)
     manifest_rows = assemble_manifest_rows(all_files, manifest_entries, line_ranges, concat_target)
     write_manifest_file(args.meta_dir, manifest_rows, args.manifest, to_stderr=args.stdout)
+    if failed_files:
+        names = ", ".join(dict.fromkeys(f.name for f in failed_files))
+        print(f"batchocr: {len(set(failed_files))} file(s) failed: {names}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

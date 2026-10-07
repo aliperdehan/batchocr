@@ -38,7 +38,9 @@ pages were OCRed. The photo was OCRed directly.
 
 ## Install
 
-`batchocr` is a single Python file.
+`batchocr` is a single Python file for plain-text extraction. PDF to Markdown
+(`--to md`) also uses the bundled `m1ck4_pdfmd/` folder next to it (see
+[Credits](#credits)).
 
 **Requirements:**
 - Python 3.10+
@@ -58,6 +60,18 @@ Calibre and LibreOffice are only needed for the formats that use them
 git clone https://github.com/aliperdehan/batchocr.git ~/batchocr
 echo 'alias batchocr="python3 ~/batchocr/batchocr.py"' >> ~/.zshrc   # or ~/.bashrc
 ```
+
+Or install the command with pip, straight from a release tag (not on PyPI):
+
+```sh
+pip install "git+https://github.com/aliperdehan/batchocr.git@v1.2.1"
+pip install "batchocr[md] @ git+https://github.com/aliperdehan/batchocr.git@v1.2.1"   # with PDF -> Markdown
+```
+
+PDF to Markdown needs **PyMuPDF** (`pip install pymupdf`, which is what the
+`md` extra installs). PyMuPDF is AGPL-3.0 licensed, so batchocr does not bundle
+it: it is a separate, optional install, and everything else, including plain
+text from PDFs, works without it.
 
 ## Usage
 
@@ -135,11 +149,56 @@ OCR is not perfect. In the example above, Tesseract read `ΔS` as `AS`.
 Where a PDF has a good text layer, `batchocr` uses it instead, and that
 text is exact.
 
+### PDF to Markdown
+
+```sh
+batchocr paper.pdf --to md                 # -> paper.md
+batchocr paper.pdf -t md -o notes/paper.md --lang eng+rus
+batchocr scans/ --to md -o md/             # one .md per PDF
+batchocr paper.pdf --to md --stdout | less
+```
+
+Markdown mode produces headings (from font size, or from line height in OCR),
+bold and italic, lists, tables, and `$$ ... $$` math where it recognises it,
+with paragraphs re-flowed and line-end hyphens repaired. It reads text per
+page, so a PDF that mixes typed and scanned pages is handled page by page:
+
+| Page type | What happens |
+|---|---|
+| Typed (text layer passes the check) | PyMuPDF reads the text blocks in stream order (columns come out whole) with font size, bold and italic |
+| Scanned, or a broken text layer | Tesseract at `--dpi`; paragraphs and reading order come from Tesseract's layout analysis, heading candidates from line height (never from low-confidence lines) |
+
+- **Page markers.** Each page starts with an HTML comment `<!-- Page 12 -->`
+  (with the printed label if it differs, `<!-- Page 150 (3-12) -->`), which is
+  invisible when rendered. `--no-page-markers` drops them; `--page-breaks`
+  adds a `---` rule between pages.
+- **Running headers, footers and page numbers** are removed when the PDF has 4
+  or more pages: only lines in the top or bottom 12% of the page that repeat
+  on at least 40% of the pages (and at least 3), or bare page numbers there.
+  The run prints what it removed.
+- **Nothing is dropped silently.** Every page is rendered, then checked: if the
+  Markdown no longer holds the page's letters and digits (for example a table
+  or math detector swallowed text), that page is re-rendered without table and
+  math detection, and the run says so. A "table" whose cells are sentences is
+  rendered as the paragraph it is.
+- **Reruns** give byte-identical output.
+- Without PyMuPDF the run stops with a one-line message and a non-zero exit
+  status; plain-text mode is unaffected.
+
+Flags borrowed from [M1ck4's `pdfmd`](https://github.com/M1ck4/pdfmd) work the
+same here: `--output`, `--ocr {off,auto,tesseract,ocrmypdf}`, `--lang`,
+`--export-images` (images to `<name>_assets/`, links appended),
+`--page-breaks`, `--preview-only` (first 3 pages), `--no-progress`, `-q`,
+`-v`, `--stats`, `--no-color`, `--version`. Differences: `--ocr` defaults to
+`auto` (the per-page hybrid) rather than `off`; `-s` is still `--stdout`,
+`-c` `--concat` and `-j` `--jobs`; `--ocr` and the other options also work in
+plain-text mode. Exit status is 0 on success and non-zero if any file failed.
+
 ## What happens to each format
 
 | Input | Default handling | Output |
 |---|---|---|
-| `.pdf` | text layer if its quality score is high enough, otherwise page-by-page Tesseract OCR | `.txt` |
+| `.pdf` | per page: the text layer if it passes the quality check, otherwise Tesseract OCR | `.txt`, or `.md` with `--to md` |
 | `.png` `.jpg` `.tif` `.bmp` ... | Tesseract OCR | `.txt` |
 | `.docx` `.pptx` | Pandoc to Markdown; every embedded image is OCRed, with its text placed right below the image | `.md` |
 | `.epub` `.mobi` `.azw3` `.cbz` ... | Calibre `ebook-convert`, falling back to Pandoc | `.txt` |
@@ -185,6 +244,19 @@ inside a merged output. Press Ctrl+C to cancel queued OCR pages cleanly.
 `batchocr --help` lists every flag. The docstring at the top of
 [`batchocr.py`](batchocr.py) documents every output rule in detail.
 
+## Credits
+
+`m1ck4_pdfmd/` is a pinned, lightly patched copy of
+[**pdfmd** by Michael Neivandt (M1ck4)](https://github.com/M1ck4/pdfmd)
+(MIT licence, copyright kept in `m1ck4_pdfmd/LICENSE`; the repository is
+archived). It supplies the PDF to Markdown structure stages: heading, list,
+table and math detection and Markdown rendering. It was written by M1ck4, not
+by batchocr's author. It is not the unrelated PyPI package called `pdfmd`.
+`VENDORED.md` records the upstream commit, checksums and the patch;
+`scripts/vendor_m1ck4.py` regenerates the folder, so it is never edited by hand.
+
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). The vendored `m1ck4_pdfmd/` is MIT as well (its own notice
+applies to it). PyMuPDF, needed only for `--to md` and installed separately, is
+AGPL-3.0.

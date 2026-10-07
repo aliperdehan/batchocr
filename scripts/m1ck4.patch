@@ -1,0 +1,249 @@
+--- a/extract.py
++++ b/extract.py
+@@ -28,7 +28,7 @@
+ from typing import Callable, List, Optional
+ 
+ try:
+-    import fitz  # type: ignore
++    import pymupdf as fitz  # type: ignore  (the `fitz` alias warns on current PyMuPDF)
+ except Exception:  # pragma: no cover - optional dependency
+     fitz = None  # type: ignore
+ 
+--- a/pipeline.py
++++ b/pipeline.py
+@@ -26,7 +26,7 @@
+ import os
+ 
+ try:
+-    import fitz  # PyMuPDF
++    import pymupdf as fitz  # PyMuPDF (the `fitz` alias warns on current PyMuPDF)
+ except Exception:
+     fitz = None
+ 
+--- a/render.py
++++ b/render.py
+@@ -18,6 +18,7 @@
+ 
+ import re
+ from statistics import median
++from dataclasses import replace
+ from typing import Callable, List, Optional
+ 
+ from .models import Block, Line, PageText, Options
+@@ -39,16 +40,13 @@
+     - italic only: *text*
+     - neither: text
+     """
+-    if not text:
++    if not text or not text.strip() or not (bold or italic):
+         return text
+ 
+-    if bold and italic:
+-        return f"***{text}***"
+-    if bold:
+-        return f"**{text}**"
+-    if italic:
+-        return f"*{text}*"
+-    return text
++    core = text.strip()
++    lead, trail = text[: len(text) - len(text.lstrip())], text[len(text.rstrip()):]
++    mark = "***" if bold and italic else "**" if bold else "*"
++    return f"{lead}{mark}{core}{mark}{trail}"
+ 
+ 
+ # ---------------------------------------------------------------------------
+@@ -172,6 +170,7 @@
+ 
+ 
+ def _is_footer_noise(text: str) -> bool:
++    return False  # batchocr: page numbers are removed in transform.py, at page edges only
+     s = text.strip()
+     if not s:
+         return False
+@@ -193,8 +192,8 @@
+     """Normalize various bullet/numbered prefixes into Markdown list syntax."""
+     s = ln.lstrip()
+     # Bullet-like prefixes
+-    if re.match(r"^[•○◦·\-–—]\s+", s):
+-        s = re.sub(r"^[•○◦·\-–—]\s+", "- ", s)
++    if re.match(r"^[•○◦·]\s+", s):
++        s = re.sub(r"^[•○◦·]\s+", "- ", s)
+         return s
+ 
+     # Numbered: "1. text" or "1) text"
+@@ -204,11 +203,6 @@
+         s = re.sub(r"^\d+[\.\)]\s+", f"{num}. ", s)
+         return s
+ 
+-    # Lettered outlines: "A. text" or "a) text" → bullet
+-    if re.match(r"^[A-Za-z][\.\)]\s+", s):
+-        s = re.sub(r"^[A-Za-z][\.\)]\s+", "- ", s)
+-        return s
+-
+     return ln.strip()
+ 
+ 
+@@ -412,7 +406,15 @@
+ 
+         else:
+             # Normal text line: escape Markdown and apply inline bold/italic.
++            # Neighbouring spans of the same style are merged so "*a* *b*" becomes "*a b*".
++            merged = []
+             for sp in spans:
++                if merged and (merged[-1].bold, merged[-1].italic) == (sp.bold, sp.italic):
++                    prev = merged[-1]
++                    merged[-1] = replace(prev, text=prev.text + sp.text, size=max(prev.size, sp.size))
++                else:
++                    merged.append(sp)
++            for sp in merged:
+                 raw_text = sp.text or ""
+                 texts_raw.append(raw_text)
+ 
+@@ -440,25 +442,35 @@
+     # Use RAW text (no ** or *) for heading heuristics
+     block_text_flat = " ".join(raw_lines).strip()
+ 
+-    heading_by_size = avg_line_size >= body_size * heading_size_ratio
+-    heading_by_caps = caps_to_headings and (
+-        is_all_caps_line(block_text_flat) or is_mostly_caps(block_text_flat)
++    # batchocr: a heading is a short block; long blocks in a bigger font or in capitals
++    # (pull-quotes, abstracts, notes) stay paragraphs.
++    # Lines OCR read with low confidence (diagram debris, noise) are never headings.
++    noisy = any(getattr(sp, "low_conf", False) for ln in block.lines for sp in ln.spans)
++    heading_sized = (
++        not noisy and len(rendered_lines) <= 3 and len(block_text_flat) <= 200
++        and sum(ch.isalnum() for ch in block_text_flat) >= 3
++        and not block_text_flat.lstrip("\"'\u201c\u2018([ ")[:1].islower()
+     )
++    heading_by_size = heading_sized and avg_line_size >= body_size * heading_size_ratio
++    heading_by_caps = (
++        caps_to_headings and not noisy and len(rendered_lines) <= 2 and len(block_text_flat) <= 100
++        and sum(ch.isalpha() for ch in block_text_flat) >= 3
++        and not block_text_flat.rstrip().endswith((".", ",", ";"))
++        and (is_all_caps_line(block_text_flat) or is_mostly_caps(block_text_flat))
++    )
+ 
+     if heading_by_size or heading_by_caps:
+         # H1 if much larger than body or if CAPS; otherwise H2
+         level = 1 if (avg_line_size >= body_size * 1.6) or heading_by_caps else 2
+ 
+-        # Heading text: use ONLY the first RAW line, not the formatted one
+-        heading_raw = raw_lines[0]
++        # Heading text: the whole (short) block, e.g. a title wrapped over two lines
++        heading_raw = " ".join(raw_lines)
+         heading_text = escape_markdown(heading_raw)
+         heading_text = re.sub(r"\s+", " ", heading_text).strip(" -:–—")
+         heading_text = normalize_punctuation(heading_text)
+         heading_line = f"{'#' * level} {heading_text}"
+ 
+-        # If there's no additional text, just output heading + blank line
+-        if len(rendered_lines) == 1:
+-            return [heading_line, ""]
++        return [heading_line, ""]
+ 
+         # Otherwise, render remaining lines as normal paragraph/list text
+         tail_text = _fix_hyphenation("\n".join(rendered_lines[1:]))
+@@ -536,7 +548,7 @@
+         body = body_sizes[i] if body_sizes and i < len(body_sizes) else 11.0
+ 
+         for blk in page.blocks:
+-            if blk.is_empty():
++            if blk.is_empty() or getattr(blk, "table_continuation", False):
+                 continue
+             md_lines.extend(
+                 _block_to_lines(
+@@ -560,12 +572,10 @@
+     if options.defragment_short:
+         md = _defragment_orphans(md, max_len=options.orphan_max_len)
+ 
+-    # Strip common footer artefacts like trailing "- - 1" or "- -" at end of lines
+-    md = re.sub(r"\s*-+\s*-+\s*\d*\s*$", "", md, flags=re.MULTILINE)
++    # Tighten spaces before a comma or full stop only ("word ," from span joins). Not
++    # across lines, and not before ; : ? ! which French and others space on purpose.
++    md = re.sub(r"[ \t]+([,.])(?=\s|$)", r"\1", md)
+ 
+-    # Tighten spaces before punctuation
+-    md = re.sub(r"\s+([,.;:?!])", r"\1", md)
+-
+     return md
+ 
+ 
+--- a/transform.py
++++ b/transform.py
+@@ -233,6 +233,8 @@
+     for p in pages:
+         new_blocks: List[Block] = []
+ 
++        edge_lines = [ln for blk in p.blocks for ln in blk.lines if _line_text(ln)]
++        edges = {id(edge_lines[0]), id(edge_lines[-1])} if edge_lines else set()
+         for blk in p.blocks:
+             new_lines: List[Line] = []
+             for ln in blk.lines:
+@@ -246,7 +248,7 @@
+                 # Strip footer if it matches (or is noise).
+                 if footer and norm and _similarity(norm, footer_norm) >= 0.95:
+                     continue
+-                if _is_footer_noise(text):
++                if id(ln) in edges and _is_footer_noise(text):
+                     continue
+ 
+                 new_lines.append(ln)
+@@ -487,7 +489,12 @@
+     
+     new_blocks: List[Block] = []
+     
++    # A table spanning several blocks (one per row) is rendered once, from its first block;
++    # the others are marked so the renderer skips them instead of printing the rows again.
++    consumed = {i for d in detections for i in range(d.block_index + 1, d.block_index + d.n_blocks)}
+     for idx, blk in enumerate(page.blocks):
++        if idx in consumed:
++            setattr(blk, "table_continuation", True)
+         if idx in table_map:
+             det = table_map[idx]
+             
+--- a/utils.py
++++ b/utils.py
+@@ -105,18 +105,9 @@
+ # ---------------------------------------------------------------------------
+ 
+ 
+-_PUNCT_MAP = {
+-    # Quotes
+-    "\u2018": "'",  # ‘
+-    "\u2019": "'",  # ’
+-    "\u201c": '"',  # “
+-    "\u201d": '"',  # ”
+-    # Dashes
+-    "\u2013": "-",  # –
+-    "\u2014": "-",  # —
+-    # Ellipsis
+-    "\u2026": "...",  # …
+-}
++# batchocr: keep the source's typography (curly quotes, en/em dashes, ellipsis);
++# flattening them changed the text, e.g. page ranges "29\u201343".
++_PUNCT_MAP: dict = {}
+ 
+ 
+ def normalize_punctuation(text: str) -> str:
+@@ -147,13 +138,19 @@
+ 
+     def _repl(match: re.Match) -> str:
+         url = match.group("url")
++        tail = ""
++        while url and url[-1] in ".,;:!?)]'\"":
++            if url[-1] == ")" and url.count("(") >= url.count(")"):
++                break
++            tail = url[-1] + tail
++            url = url[:-1]
+         # Avoid double-wrapping if already inside <...>
+         if url.startswith("<") and url.endswith(">"):
+             return url
+         # If it's a www. URL, add scheme for safety
+         if url.lower().startswith("www."):
+-            return f"<https://{url}>"
+-        return f"<{url}>"
++            return f"<https://{url}>{tail}"
++        return f"<{url}>{tail}"
+ 
+     return _URL_RE.sub(_repl, text)
+ 

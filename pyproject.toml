@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "batchocr"
+dynamic = ["version"]
+description = "Batch document extraction and OCR: PDF (per-page hybrid text/OCR), images, Office files and ebooks to text or Markdown"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE", "m1ck4_pdfmd/LICENSE"]
+keywords = ["ocr", "pdf", "markdown", "tesseract", "text-extraction"]
+dependencies = []
+
+[project.optional-dependencies]
+# PDF -> Markdown (--to md). PyMuPDF is AGPL-3.0 and is therefore never bundled: it is
+# installed separately, only if you ask for this extra.
+md = ["pymupdf"]
+
+[project.scripts]
+batchocr = "batchocr:main"
+
+[project.urls]
+Source = "https://github.com/aliperdehan/batchocr"
+
+[tool.setuptools]
+py-modules = ["batchocr"]
+packages = ["m1ck4_pdfmd"]
+
+[tool.setuptools.package-data]
+m1ck4_pdfmd = ["LICENSE"]
+
+[tool.setuptools.dynamic]
+version = { attr = "batchocr.BATCHOCR_VERSION" }

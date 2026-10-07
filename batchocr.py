@@ -159,7 +159,7 @@ Supplementary outputs:
   batchocr input.pdf -m
 """
 
-BATCHOCR_VERSION = "1.2.1"
+BATCHOCR_VERSION = "1.2.2"
 
 EDGE_ZONE = 0.12             # top/bottom share of a page where running headers and footers live
 MIN_PAGES_HEADER_FOOTER = 4  # repeated header/footer removal needs at least this many pages
@@ -1453,7 +1453,7 @@ def main():
             # No -o and no --concat: merge the whole directory into
             # "<dirname>.txt" beside it -- the same "write beside the input,
             # named after it" convention single-file mode already uses.
-            concat_target = input_path.parent / f"{input_path.name}.txt"
+            concat_target = input_path.parent / f"{input_path.name}{'.md' if md_mode else '.txt'}"
             args.output_dir = None
             args.concat = True
     elif single_file:

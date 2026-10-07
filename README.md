@@ -145,6 +145,12 @@ batchocr uses its content-stream order; without it, plain `pdftotext`. Pass
 visual rows (useful for a fixed-width table) but interleaves columns line by
 line.
 
+OCR quality depends first on the language pack. A Kazakh page read with
+`--lang rus` scores a word F1 of about 0.40 against its true text, with
+`--lang kaz+rus` about 0.80, and page segmentation mode or DPI changes
+barely matter; Ukrainian needs `ukr`, Portuguese `por`, and so on
+(`tesseract --list-langs` shows what is installed; a missing pack is an error).
+
 OCR is not perfect. In the example above, Tesseract read `ΔS` as `AS`.
 Where a PDF has a good text layer, `batchocr` uses it instead, and that
 text is exact.

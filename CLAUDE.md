@@ -26,6 +26,17 @@ old backup diffs alone is unreliable.
 **Verify through the real command**, on real input files, not only
 synthetic snippets.
 
+## Tests, vendored code, optional dependencies
+
+- `python3 -m unittest discover tests` (fixtures are built at test time; tests
+  needing PyMuPDF or Tesseract skip without them). Never commit real documents.
+- `m1ck4_pdfmd/` is generated (pinned copy of M1ck4/pdfmd, MIT) by
+  `scripts/vendor_m1ck4.py` from pristine upstream plus `scripts/m1ck4.patch`;
+  see `VENDORED.md`. Don't hand-edit it without regenerating the patch
+  (`--update-patch`); `--check` verifies it. Keep its MIT notice.
+- PyMuPDF is AGPL-3.0: an optional, separately installed dependency, only
+  needed for `--to md`. Never bundle it or make plain-text mode require it.
+
 ## Location
 
 The real file is `~/dev/py/batchocr/batchocr.py`.

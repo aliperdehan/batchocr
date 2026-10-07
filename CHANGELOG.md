@@ -2,6 +2,13 @@
 
 Newest first. History before 1.1.0 was not tracked.
 
+## 1.2.2 — 2026-10-07
+
+- A directory run with `--to md` and no `-o` merges into `<dir>.md` (it was
+  `<dir>.txt`).
+- README: the OCR language pack matters more than any other setting (Kazakh
+  with `rus` vs `kaz+rus`).
+
 ## 1.2.1 — 2026-10-07
 
 - **PDF to Markdown.** `--to md` (`-t md`) writes Markdown with headings,

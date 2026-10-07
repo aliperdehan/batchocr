@@ -3,13 +3,16 @@
 batchocr -- batch document extraction and OCR.
 
 What it handles:
-  - PDF: hybrid text extraction by default -- samples the native text layer,
-    and files scoring at least the quality threshold use pdftotext; lower-
-    scoring (garbled/scanned) files receive full-page Tesseract OCR
-    automatically. Use --full-ocr to always force full OCR on every page
-    regardless of native text quality (the old default; still the better
-    choice for garbled/scanned sources). -H/--hybrid is kept as a harmless
-    no-op for backward compatibility.
+  - PDF: hybrid text extraction by default, decided per page. Every page's
+    native text layer is scored (plausible characters and words); pages that
+    score at least the quality threshold keep it, the others (scans, blank
+    text layers, broken font encodings) get full-page Tesseract OCR. One
+    sampled page is also OCRed and compared with its text layer; if the words
+    disagree the whole layer is rejected. Native text comes out in reading
+    order (PyMuPDF content-stream order when PyMuPDF is installed, plain
+    pdftotext otherwise); --layout restores the old "pdftotext -layout" rows.
+    Use --full-ocr to force OCR on every page. -H/--hybrid is kept as a
+    harmless no-op for backward compatibility.
   - Images (.png/.jpg/.jpeg/.tif/.tiff/.bmp/.pnm): OCRed directly with
     Tesseract, no rasterisation needed. A single image is treated like a
     single-page document. A directory of page images (page1.png, page2.png,
@@ -146,7 +149,10 @@ Supplementary outputs:
   batchocr input.pdf -m
 """
 
-BATCHOCR_VERSION = "1.1.1"
+BATCHOCR_VERSION = "1.2.0"
+
+MIN_PAGE_CHARS = 20          # fewer non-space characters than this = no usable text layer
+OCR_CHECK_MIN_OVERLAP = 0.3  # sampled-page word overlap below which the text layer is rejected
 
 import argparse
 import concurrent.futures as cf
@@ -159,6 +165,7 @@ import sys
 import tempfile
 import time
 import glob
+import unicodedata
 from pathlib import Path
 
 PDF_EXT = {".pdf"}
@@ -416,11 +423,11 @@ def pdf_page_count(pdf_path: Path) -> int:
 
 def word_quality(text: str) -> float:
     """Cheap heuristic: fraction of tokens that look like real words,
-    not font-encoding garbage. Used only for the hybrid native-vs-OCR check
-    (skipped entirely when --full-ocr is given)."""
+    not font-encoding garbage. Returns 1.0 when there are no letter tokens
+    to judge (digits, symbols, scripts without word spacing)."""
     tokens = re.findall(r"[A-Za-zÀ-ÿЀ-ӿ][A-Za-zÀ-ÿЀ-ӿ'\-]*", text)
     if not tokens:
-        return 0.0
+        return 1.0
     good = sum(
         1
         for t in tokens
@@ -430,17 +437,113 @@ def word_quality(text: str) -> float:
     return good / len(tokens)
 
 
-def native_quality_for_file(pdf_path: Path, pages: int) -> float:
-    if pages == 0:
+# Letters from these Latin-Extended-B code points are real (Romanian, Vietnamese,
+# pinyin); the rest of that block, IPA and modifier letters are what a broken
+# font encoding typically produces.
+_LATIN_EXT_B_OK = {0x218, 0x219, 0x21A, 0x21B, 0x1A0, 0x1A1, 0x1AF, 0x1B0}
+_EXPECTED_PUNCT = frozenset(".,;:'\"()[]-–—/%?!“”‘’«»…&@#*+=<>_|\\^~$€£§©®°±×÷•·†‡¶ﬀﬁﬂﬃﬄ")
+
+
+def char_quality(text: str) -> float:
+    """Share of non-space characters that are plausible text: letters (outside the
+    IPA/modifier/Latin-Extended-B ranges that broken font encodings spill into),
+    digits and ordinary punctuation. Private-use, replacement and control
+    characters count against the page. 1.0 for a page with no characters."""
+    chars = [c for c in text if not c.isspace()]
+    if not chars:
+        return 1.0
+    ok = 0
+    for c in chars:
+        cp = ord(c)
+        cat = unicodedata.category(c)
+        if cat in ("Co", "Cs", "Cn", "Cc") or cp == 0xFFFD or 0x0250 <= cp <= 0x02FF:
+            continue
+        if 0x0180 <= cp <= 0x024F and cp not in _LATIN_EXT_B_OK and not 0x1CD <= cp <= 0x1DC:
+            continue
+        if cat[0] in "LNM" or c in _EXPECTED_PUNCT:
+            ok += 1
+    return ok / len(chars)
+
+
+def page_quality(text: str) -> float:
+    """Quality of one page's native text layer: the worse of the character check
+    and the word check. A page with (almost) no text scores 0 so it gets OCRed."""
+    if sum(1 for c in text if not c.isspace()) < MIN_PAGE_CHARS:
         return 0.0
-    mid = max(1, pages // 2)
-    out = subprocess.run(
-        ["pdftotext", "-f", str(mid), "-l", str(mid), str(pdf_path), "-"],
-        capture_output=True,
-        text=True,
-        errors="replace",
-    ).stdout
-    return word_quality(out)
+    return min(char_quality(text), word_quality(text))
+
+
+def word_overlap(native: str, ocr: str) -> float:
+    """Share of the OCR's words (3+ letters) that also occur in the native text.
+    OCR can miss words, but a corrupted text layer cannot reproduce the page's words."""
+    ocr_words = re.findall(r"\w{3,}", ocr.lower())
+    if not ocr_words:
+        return 1.0
+    have = set(re.findall(r"\w{3,}", native.lower()))
+    return sum(w in have for w in ocr_words) / len(ocr_words)
+
+
+def native_pages(pdf_path: Path, layout: bool = False) -> list[str]:
+    """Native text of every page, in reading order. PyMuPDF blocks in content-stream
+    order when PyMuPDF is installed (columns come out whole); otherwise plain
+    pdftotext, which also reads columns in order. layout=True is the old
+    'pdftotext -layout' (visual rows: columns and tables come out interleaved)."""
+    if not layout:
+        try:
+            import pymupdf
+        except ImportError:
+            pymupdf = None
+        if pymupdf is not None:
+            pymupdf.TOOLS.mupdf_display_errors(False)
+            try:
+                with pymupdf.open(pdf_path) as doc:
+                    return [
+                        "\n\n".join(
+                            b[4].strip("\n") for b in page.get_text("blocks")
+                            if b[6] == 0 and b[4].strip()
+                        )
+                        for page in doc
+                    ]
+            except Exception:
+                pass  # encrypted or broken for PyMuPDF; pdftotext may still cope
+    cmd = ["pdftotext"] + (["-layout"] if layout else []) + [str(pdf_path), "-"]
+    out = subprocess.run(cmd, capture_output=True, text=True, errors="replace").stdout
+    pages = out.split("\f")
+    if pages and not pages[-1].strip():
+        pages.pop()
+    return pages
+
+
+def plan_native_pages(pdf_path: Path, page_texts: list[str], threshold: float,
+                      lang: str, tmp_root: Path, crosscheck: bool = True) -> tuple[dict, str]:
+    """Decide per page whether the native text layer can be trusted. Returns
+    ({page_number: text} for the pages that keep it, a one-line explanation).
+    Pages scoring under the threshold, or with no text, are left out (-> OCR).
+    One sampled page is also OCRed and compared word-for-word with its text
+    layer; if they disagree the whole layer is distrusted, because a corrupted
+    font encoding usually affects the entire document."""
+    scores = {pn: page_quality(t) for pn, t in enumerate(page_texts, start=1)}
+    keep = {pn: page_texts[pn - 1] for pn, q in scores.items() if q >= threshold}
+    bad = sorted(set(scores) - set(keep))
+    note = f"{len(keep)}/{len(scores)} pages pass the text-layer check"
+    if keep and crosscheck:
+        sample = min(keep, key=lambda pn: (scores[pn], abs(pn - len(scores) // 2)))
+        try:
+            overlap = word_overlap(keep[sample], ocr_one_page(pdf_path, sample, 150, lang, tmp_root))
+        except Exception:
+            overlap = 1.0
+        if overlap < OCR_CHECK_MIN_OVERLAP:
+            return {}, (f"OCR check on page {sample}: only {overlap:.0%} of its words are in the "
+                        "text layer -> text layer is corrupt, using OCR")
+        note += f", OCR check on page {sample}: {overlap:.0%} word overlap"
+    if bad:
+        note += f"; OCR for page{'s' if len(bad) > 1 else ''} {format_page_list(bad)}"
+    return keep, note
+
+
+def format_page_list(pages: list[int], limit: int = 12) -> str:
+    shown = ", ".join(str(p) for p in pages[:limit])
+    return shown + (f" (+{len(pages) - limit} more)" if len(pages) > limit else "")
 
 
 def ocr_one_page(pdf_path: Path, page_num: int, dpi: int, lang: str, tmp_root: Path) -> str:
@@ -499,24 +602,13 @@ def page_marker(page_num: int, labels: dict[int, str]) -> str:
     return f"--- Page {page_num} ({label}) ---" if label else f"--- Page {page_num} ---"
 
 
-def native_extract_pdf(pdf_path: Path, page_markers: bool = True) -> str:
-    result = subprocess.run(
-        ["pdftotext", "-layout", str(pdf_path), "-"],
-        capture_output=True,
-        text=True,
-        errors="replace",
-    )
+def assemble_pages(pdf_path: Path, texts: dict[int, str], page_markers: bool = True) -> str:
+    """Join per-page texts in page order, with '--- Page N ---' markers unless disabled."""
     if not page_markers:
-        return result.stdout
-    # pdftotext ends every page with a form feed, so the last split element is
-    # the (empty) remainder after the final page.
-    pages = result.stdout.split("\f")
-    if pages and not pages[-1].strip():
-        pages.pop()
+        return "\n".join(texts[pn].strip("\n") + "\n" for pn in sorted(texts))
     labels = pdf_page_labels(pdf_path)
     return "".join(
-        f"\n\n{page_marker(pn, labels)}\n\n{text.strip(chr(10))}\n"
-        for pn, text in enumerate(pages, start=1)
+        f"\n\n{page_marker(pn, labels)}\n\n{texts[pn].strip()}\n" for pn in sorted(texts)
     )
 
 
@@ -830,6 +922,13 @@ def main():
                      help="always force full-page Tesseract OCR on every PDF page, bypassing "
                           "native-text-layer detection -- this was the old default, still the "
                           "better choice for garbled/scanned sources")
+    ap.add_argument("--layout", action="store_true",
+                     help="native-text PDFs: use 'pdftotext -layout' (visual rows, the pre-1.2.0 "
+                          "behavior) instead of reading-order extraction; keeps wide tables aligned "
+                          "but interleaves columns line by line")
+    ap.add_argument("--no-ocr-check", action="store_true",
+                     help="hybrid mode: skip the OCR of one sampled page that cross-checks a "
+                          "PDF's text layer against what is actually printed on the page")
     ap.add_argument("--no-page-markers", action="store_true",
                     help="native-text PDFs: output pdftotext's text without '--- Page N ---' "
                          "markers (the pre-1.1.0 behavior); OCR output always keeps them")
@@ -1248,22 +1347,26 @@ def main():
         pending_pdfs.append(pdf)
 
     tasks = []
+    native_kept = {}  # pdf -> {page: native text} for pages that skip OCR
+    run_tmp_root = Path(tempfile.mkdtemp(prefix="batchocr-run-"))
     for pdf in pending_pdfs:
         pages = pdf_page_count(pdf)
         if pages == 0:
             print(f"[warn] {pdf.name}: pdfinfo reported 0 pages, skipping", file=sys.stderr)
             continue
 
-        use_native = False
+        keep = {}
         if not args.full_ocr:
-            q = native_quality_for_file(pdf, pages)
-            use_native = q >= args.quality_threshold
-            print(f"[hybrid] {pdf.name}: native quality {q:.2f} -> "
-                  f"{'using native text layer' if use_native else 'forcing OCR'}")
+            keep, note = plan_native_pages(
+                pdf, native_pages(pdf, layout=args.layout), args.quality_threshold,
+                args.lang, run_tmp_root, crosscheck=not args.no_ocr_check,
+            )
+            print(f"[hybrid] {pdf.name}: {note}")
+        ocr_pages = [p for p in range(1, pages + 1) if p not in keep]
 
-        if use_native:
+        if not ocr_pages:
             file_started = time.monotonic()
-            text = native_extract_pdf(pdf, page_markers=not args.no_page_markers)
+            text = assemble_pages(pdf, keep, page_markers=not args.no_page_markers)
             label = route_output(pdf, ".txt", text)
             manifest_entries[pdf] = (".pdf", pages, len(text.split()), text[:300].replace("\n", " "), label)
             print(f"[done, native] {pdf.name} -> {label} ({len(text)} chars, {pages} pages)"
@@ -1271,7 +1374,8 @@ def main():
             completed_sources.append(pdf)
             archive_source(pdf, args.archive_dir)
         else:
-            for p in range(1, pages + 1):
+            native_kept[pdf] = keep
+            for p in ocr_pages:
                 tasks.append((pdf, p, pages))
 
     if tasks:
@@ -1282,7 +1386,7 @@ def main():
         pending_counts = {}
         for pdf, p, pages in tasks:
             pending_counts[pdf] = pending_counts.get(pdf, 0) + 1
-        page_results = {pdf: {} for pdf in pending_counts}
+        page_results = {pdf: dict(native_kept[pdf]) for pdf in pending_counts}
 
         total = len(tasks)
         done = 0
@@ -1290,7 +1394,6 @@ def main():
         last_progress_done = 0
         last_progress_time = batch_started
         file_started = {pdf: batch_started for pdf in pending_counts}
-        run_tmp_root = Path(tempfile.mkdtemp(prefix="batchocr-run-"))
         ex = cf.ProcessPoolExecutor(max_workers=args.jobs)
         future_map = {
             ex.submit(ocr_one_page, pdf, p, args.dpi, args.lang, run_tmp_root): (pdf, p)
@@ -1318,10 +1421,7 @@ def main():
                     last_progress_time = time.monotonic()
 
                 if pending_counts[pdf] == 0:
-                    full_text = ""
-                    labels = pdf_page_labels(pdf)
-                    for pn in sorted(page_results[pdf]):
-                        full_text += f"\n\n{page_marker(pn, labels)}\n\n{page_results[pdf][pn].strip()}\n"
+                    full_text = assemble_pages(pdf, page_results[pdf])
                     label = route_output(pdf, ".txt", full_text)
                     pages_total = pdf_page_count(pdf)
                     manifest_entries[pdf] = (
@@ -1340,6 +1440,7 @@ def main():
                 file=sys.stderr,
             )
             stop_executor(ex, future_map)
+            shutil.rmtree(run_tmp_root, ignore_errors=True)
             # Everything finished before the interrupt already has its output
             # recorded -- make sure the merge/manifest reflect that too instead
             # of being silently skipped by the early exit below.
@@ -1349,11 +1450,9 @@ def main():
             raise SystemExit(130)
         else:
             ex.shutdown(wait=True)
-        finally:
-            # Sweeps any page temp-dirs a forcibly-terminated worker didn't
-            # get to clean up itself.
-            shutil.rmtree(run_tmp_root, ignore_errors=True)
 
+    # Sweeps any page temp-dirs a forcibly-terminated worker didn't get to clean up itself.
+    shutil.rmtree(run_tmp_root, ignore_errors=True)
     line_ranges = write_merged_output(concat_target, args.stdout and not single_file, concat_entries, all_files)
     manifest_rows = assemble_manifest_rows(all_files, manifest_entries, line_ranges, concat_target)
     write_manifest_file(args.meta_dir, manifest_rows, args.manifest, to_stderr=args.stdout)

@@ -8,8 +8,8 @@ real text.
 ```console
 $ batchocr inbox/ -o text/
 [done, OCR] photo-of-board.png -> photo-of-board.txt (200 chars) | time 00:00:00
-[hybrid] scanned-handout.pdf: native quality 0.00 -> forcing OCR
-[hybrid] typed-notes.pdf: native quality 1.00 -> using native text layer
+[hybrid] scanned-handout.pdf: 0/1 pages pass the text-layer check; OCR for page 1
+[hybrid] typed-notes.pdf: 1/1 pages pass the text-layer check, OCR check on page 1: 100% word overlap
 [done, native] typed-notes.pdf -> typed-notes.txt (392 chars, 1 pages) | time 00:00:00
 [info] OCR queue: 1 pages across 1 file(s), auto workers, 300 dpi, lang=eng
 [progress] 1/1 pages OCR'd | elapsed 00:00:02 | last 1 pages in 00:00:01
@@ -25,9 +25,10 @@ pages were OCRed. The photo was OCRed directly.
 - **OCR is slow and lossy, but sometimes necessary.** Running Tesseract on
   a PDF that already contains real text wastes minutes and swaps exact text
   for recognition errors. Skipping OCR on a scan gives you nothing, or
-  garbage. `batchocr` samples each PDF's text layer and gives it a quality
-  score. Files that score well are extracted with `pdftotext`; the rest are
-  OCRed page by page.
+  garbage. `batchocr` scores every page's text layer (are the characters
+  plausible text?) and OCRs one sampled page to check that the layer says
+  what the page shows. Pages that pass keep their exact text; the rest are
+  OCRed, so a PDF that mixes typed and scanned pages is handled page by page.
 - **Real folders are mixed.** One tool needs to handle the PDF, the
   PowerPoint, the phone photo and the `.epub` alike, and pick the right
   backend for each.
@@ -109,14 +110,26 @@ With several inputs, `-o` is always treated as a folder unless you add
 
 ```sh
 batchocr inbox/ --quality-threshold 0.85   # OCR more readily (default 0.75)
+batchocr inbox/ --no-ocr-check             # skip the sampled-page OCR cross-check (faster)
+batchocr paper.pdf --layout                # old `pdftotext -layout` rows instead of reading order
 batchocr old-scan.pdf --full-ocr           # always OCR, ignoring any text layer
 batchocr inbox/ --dpi 400                  # sharper rendering for small print (default 300)
 batchocr inbox/ --lang eng+rus             # several Tesseract languages
 batchocr inbox/ -j 4                       # number of parallel OCR workers (default: all cores)
 ```
 
-`--full-ocr` is the right choice for a PDF whose text layer exists but is
-garbled, as in some old scans that were OCRed badly.
+`--full-ocr` forces OCR on every page. It is rarely needed now: a text layer
+with a broken font encoding (symbols and accented junk where the words should
+be) fails the character check, and a layer that looks like words but does not
+match the page fails the OCR cross-check, so those PDFs fall back to OCR
+automatically.
+
+Native text comes out in reading order: whole columns, tables row by row as
+the PDF stores them. With PyMuPDF installed (`pip install pymupdf`, optional)
+batchocr uses its content-stream order; without it, plain `pdftotext`. Pass
+`--layout` to get the pre-1.2.0 `pdftotext -layout` output, which keeps
+visual rows (useful for a fixed-width table) but interleaves columns line by
+line.
 
 OCR is not perfect. In the example above, Tesseract read `ΔS` as `AS`.
 Where a PDF has a good text layer, `batchocr` uses it instead, and that

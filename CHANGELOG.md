@@ -2,6 +2,16 @@
 
 Newest first. History before 1.1.0 was not tracked.
 
+## 1.2.4 — 2026-10-07
+
+- Markdown output ends with `<!-- text extracted with batchocr vX.Y.Z -->`
+  (version only, so reruns stay byte-identical). `--no-provenance` leaves it out.
+- The per-page text-loss check now tolerates 0.3% of a page's letters and digits
+  (was 1%); pages over that are re-rendered without table/math detection.
+- Fixed `-q` together with `--log`: the log file stayed almost empty.
+- `--ocr ocrmypdf` now logs `[done, OCRmyPDF]` instead of `[done, native]`.
+- README: native text can differ slightly with and without PyMuPDF installed.
+
 ## 1.2.3 — 2026-10-07
 
 - New `--keep-headers` (Markdown output): keep running headers, footers and

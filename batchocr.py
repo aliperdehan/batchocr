@@ -159,7 +159,7 @@ Supplementary outputs:
   batchocr input.pdf -m
 """
 
-BATCHOCR_VERSION = "1.2.3"
+BATCHOCR_VERSION = "1.2.4"
 
 EDGE_ZONE = 0.12             # top/bottom share of a page where running headers and footers live
 MIN_PAGES_HEADER_FOOTER = 4  # repeated header/footer removal needs at least this many pages
@@ -906,7 +906,8 @@ LIGATURES = {"ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl", "ﬃ": "ffi", "ﬄ": "ffl",
 OCR_MIN_CONF = 70            # mean word confidence under which an OCR line cannot be a heading
 OCR_HEADING_RATIO = 1.3      # an OCR line this much taller than the page median may be a heading
 PROSE_CELL_WORDS = 8         # a table cell this long is a sentence: the 'table' is really a paragraph
-MD_GUARD_TOLERANCE = 0.01    # share of a page's letters/digits a Markdown render may change
+PROVENANCE_COMMENT = f"<!-- text extracted with batchocr v{BATCHOCR_VERSION} -->"
+MD_GUARD_TOLERANCE = 0.003   # share of a page's letters/digits a Markdown render may change
 
 
 def require_markdown_deps():
@@ -1148,7 +1149,7 @@ def render_page_guarded(base_page, body_size, options, render_document, verbose=
 
 def pages_to_markdown(pdf_path: Path, total: int, ocr_tsv: dict, page_limit: int | None, *,
                       page_markers=True, page_breaks=False, verbose=0, native_pdf: Path | None = None,
-                      strip_edges=True):
+                      strip_edges=True, provenance=True):
     """Whole-document Markdown. Pages in ocr_tsv (page -> Tesseract TSV) are OCR pages; every
     other page is read from its native text layer (PyMuPDF), so a PDF may mix both."""
     pymupdf = require_markdown_deps()
@@ -1190,6 +1191,8 @@ def pages_to_markdown(pdf_path: Path, total: int, ocr_tsv: dict, page_limit: int
             head.append(page_marker_comment(pn, labels))
         parts.append("\n\n".join(head + ([md.strip()] if md.strip() else [])))
     text = re.sub(r"\n{3,}", "\n\n", "\n\n".join(p for p in parts if p)).strip() + "\n"
+    if provenance:
+        text += f"\n{PROVENANCE_COMMENT}\n"
     return text, {"pages": len(pages), "ocr_pages": len(ocr_tsv), "simplified": simplified,
                   "removed_lines": len(removed)}
 
@@ -1317,6 +1320,9 @@ def main():
     ap.add_argument("--keep-headers", action="store_true",
                      help="Markdown output: keep running headers, footers and page numbers "
                           "(by default they are removed from PDFs of 4+ pages and listed in the log)")
+    ap.add_argument("--no-provenance", action="store_true",
+                     help="Markdown output: leave out the closing '<!-- text extracted with "
+                          "batchocr vX.Y.Z -->' comment")
     ap.add_argument("--stats", action="store_true",
                      help="Markdown output: print word/heading/table/list counts when done")
     ap.add_argument("--no-progress", action="store_true", help="suppress [progress] lines")
@@ -1547,7 +1553,9 @@ def main():
         # written explicitly via sys.__stdout__ -- safe to pipe.
         sys.stdout = sys.stderr
     if args.quiet:
-        sys.stdout = open(os.devnull, "w")  # real --stdout text goes through sys.__stdout__
+        # real --stdout text goes through sys.__stdout__; a --log file still records everything
+        quiet_out = open(os.devnull, "w")
+        sys.stdout = Tee(quiet_out, sys.stdout.logfile) if isinstance(sys.stdout, Tee) else quiet_out
 
     if is_dir_mode:
         # Natural (numeric-aware) sort so a folder of page images -- page2.png,
@@ -1774,6 +1782,7 @@ def main():
                 pdf, pages, tsv, limit if args.preview_only else None,
                 page_markers=not args.no_page_markers, page_breaks=args.page_breaks,
                 verbose=args.verbose, native_pdf=native_pdf, strip_edges=not args.keep_headers,
+                provenance=not args.no_provenance,
             )
             if args.export_images:
                 text = export_pdf_images(pdf, output_for(pdf, ".md"), text, limit, args)
@@ -1831,7 +1840,8 @@ def main():
         ocr_pages = [p for p in range(1, pages + 1) if p not in keep]
 
         if not ocr_pages:
-            finish_pdf(pdf, pages, keep, {}, file_started, "native", native_pdf=src)
+            finish_pdf(pdf, pages, keep, {}, file_started,
+                       "OCRmyPDF" if args.ocr == "ocrmypdf" else "native", native_pdf=src)
         else:
             native_kept[pdf] = keep
             native_src[pdf] = src

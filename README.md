@@ -138,7 +138,9 @@ be) fails the character check, and a layer that looks like words but does not
 match the page fails the OCR cross-check, so those PDFs fall back to OCR
 automatically.
 
-Native text comes out in reading order: whole columns, tables row by row as
+Native text comes out in reading order (the exact text can differ a little
+with and without PyMuPDF installed, because the two readers format and order
+blocks differently): whole columns, tables row by row as
 the PDF stores them. With PyMuPDF installed (`pip install pymupdf`, optional)
 batchocr uses its content-stream order; without it, plain `pdftotext`. Pass
 `--layout` to get the pre-1.2.0 `pdftotext -layout` output, which keeps
@@ -189,6 +191,8 @@ page, so a PDF that mixes typed and scanned pages is handled page by page:
   or math detector swallowed text), that page is re-rendered without table and
   math detection, and the run says so. A "table" whose cells are sentences is
   rendered as the paragraph it is.
+- **Provenance.** The file ends with `<!-- text extracted with batchocr v1.2.4 -->`
+  (version only, so reruns stay byte-identical); `--no-provenance` leaves it out.
 - **Reruns** give byte-identical output.
 - Without PyMuPDF the run stops with a one-line message and a non-zero exit
   status; plain-text mode is unaffected.

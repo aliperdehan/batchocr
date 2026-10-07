@@ -196,6 +196,21 @@ class EndToEndTests(unittest.TestCase):
         self.assertNotIn("<!-- Page", self.convert(multipage, "--no-page-markers"))
         self.assertIn("Journal of Tests", self.convert(multipage, "--keep-headers"))
 
+    def test_provenance_trailer_is_version_only_and_optional(self):
+        md = self.convert(columns_page)
+        self.assertTrue(md.rstrip().endswith(f"<!-- text extracted with batchocr v{B.BATCHOCR_VERSION} -->"))
+        self.assertNotIn("text extracted", self.convert(columns_page, "--no-provenance"))
+
+    def test_quiet_still_fills_the_log(self):
+        pdf = self.dir / "doc.pdf"
+        build(pdf, columns_page)
+        log = self.dir / "run.log"
+        r = run_cli(str(pdf), "--to", "md", "-o", str(self.dir / "o.md"), "--force", "-q",
+                    "--no-ocr-check", "--log", str(log))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "")
+        self.assertIn("[done, native]", log.read_text())
+
     def test_rerun_is_byte_identical(self):
         self.assertEqual(self.convert(multipage), self.convert(multipage))
 

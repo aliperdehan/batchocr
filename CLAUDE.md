@@ -16,12 +16,12 @@ This repository is public. Don't commit personal details (absolute
 last commit is the exact pre-edit state. Don't create `.bak` copies.
 Older backups live in `~/dev/python-projects/backups/`.
 
-**Versioning:** as of 2026-09-25 there is no version marker and no
-`CHANGELOG.md` yet. Add both the next time the script is substantively
-modified, following the pattern pdfmd uses (a `*_VERSION` constant right
-after the docstring, a `--version` flag, and a newest-first `CHANGELOG.md`
-updated in the same edit). Don't backfill a history: reconstructing intent
-from old backup diffs alone is unreliable.
+**Versioning:** the version lives in the `BATCHOCR_VERSION` constant right
+after the docstring (shown by `--version`), and `CHANGELOG.md` is
+newest-first. Any substantive change bumps the constant and adds a changelog
+entry in the same commit, following the pattern pdfmd uses. History before
+1.1.0 is not tracked and should not be backfilled: reconstructing intent from
+old backup diffs alone is unreliable.
 
 **Verify through the real command**, on real input files, not only
 synthetic snippets.

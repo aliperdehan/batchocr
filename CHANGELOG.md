@@ -2,6 +2,13 @@
 
 Newest first. History before 1.1.0 was not tracked.
 
+## 1.2.3 — 2026-10-07
+
+- New `--keep-headers` (Markdown output): keep running headers, footers and
+  page numbers instead of removing them. A repeated line at the top of every
+  page can be content rather than a header (a form field label), and position
+  plus repetition cannot always tell.
+
 ## 1.2.2 — 2026-10-07
 
 - A directory run with `--to md` and no `-o` merges into `<dir>.md` (it was

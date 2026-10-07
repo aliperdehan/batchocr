@@ -181,7 +181,9 @@ page, so a PDF that mixes typed and scanned pages is handled page by page:
 - **Running headers, footers and page numbers** are removed when the PDF has 4
   or more pages: only lines in the top or bottom 12% of the page that repeat
   on at least 40% of the pages (and at least 3), or bare page numbers there.
-  The run prints what it removed.
+  The run prints what it removed; a repeated line that is really content (a
+  form field label at the top of every page, say) can be mistaken for a
+  header, so `--keep-headers` turns the removal off.
 - **Nothing is dropped silently.** Every page is rendered, then checked: if the
   Markdown no longer holds the page's letters and digits (for example a table
   or math detector swallowed text), that page is re-rendered without table and

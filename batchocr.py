@@ -159,7 +159,7 @@ Supplementary outputs:
   batchocr input.pdf -m
 """
 
-BATCHOCR_VERSION = "1.2.2"
+BATCHOCR_VERSION = "1.2.3"
 
 EDGE_ZONE = 0.12             # top/bottom share of a page where running headers and footers live
 MIN_PAGES_HEADER_FOOTER = 4  # repeated header/footer removal needs at least this many pages
@@ -1147,7 +1147,8 @@ def render_page_guarded(base_page, body_size, options, render_document, verbose=
 
 
 def pages_to_markdown(pdf_path: Path, total: int, ocr_tsv: dict, page_limit: int | None, *,
-                      page_markers=True, page_breaks=False, verbose=0, native_pdf: Path | None = None):
+                      page_markers=True, page_breaks=False, verbose=0, native_pdf: Path | None = None,
+                      strip_edges=True):
     """Whole-document Markdown. Pages in ocr_tsv (page -> Tesseract TSV) are OCR pages; every
     other page is read from its native text layer (PyMuPDF), so a PDF may mix both."""
     pymupdf = require_markdown_deps()
@@ -1167,7 +1168,7 @@ def pages_to_markdown(pdf_path: Path, total: int, ocr_tsv: dict, page_limit: int
 
     pages = T.strip_drop_caps(pages)
     removed = []
-    if len(pages) >= MIN_PAGES_HEADER_FOOTER:
+    if strip_edges and len(pages) >= MIN_PAGES_HEADER_FOOTER:
         pages, removed = strip_running_edges(pages)
         if removed:
             shown = "; ".join(dict.fromkeys(removed[:4]))
@@ -1313,6 +1314,9 @@ def main():
                      help="Markdown output: put a '---' rule between pages")
     ap.add_argument("--preview-only", action="store_true",
                      help="PDFs: process only the first 3 pages")
+    ap.add_argument("--keep-headers", action="store_true",
+                     help="Markdown output: keep running headers, footers and page numbers "
+                          "(by default they are removed from PDFs of 4+ pages and listed in the log)")
     ap.add_argument("--stats", action="store_true",
                      help="Markdown output: print word/heading/table/list counts when done")
     ap.add_argument("--no-progress", action="store_true", help="suppress [progress] lines")
@@ -1769,7 +1773,7 @@ def main():
             text, st = pages_to_markdown(
                 pdf, pages, tsv, limit if args.preview_only else None,
                 page_markers=not args.no_page_markers, page_breaks=args.page_breaks,
-                verbose=args.verbose, native_pdf=native_pdf,
+                verbose=args.verbose, native_pdf=native_pdf, strip_edges=not args.keep_headers,
             )
             if args.export_images:
                 text = export_pdf_images(pdf, output_for(pdf, ".md"), text, limit, args)

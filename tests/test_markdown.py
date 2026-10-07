@@ -194,6 +194,7 @@ class EndToEndTests(unittest.TestCase):
         self.assertIn("hyphenated word", md)
         self.assertIn("\n# Section 3\n", md)
         self.assertNotIn("<!-- Page", self.convert(multipage, "--no-page-markers"))
+        self.assertIn("Journal of Tests", self.convert(multipage, "--keep-headers"))
 
     def test_rerun_is_byte_identical(self):
         self.assertEqual(self.convert(multipage), self.convert(multipage))

@@ -206,6 +206,25 @@ same here: `--output`, `--ocr {off,auto,tesseract,ocrmypdf}`, `--lang`,
 `-c` `--concat` and `-j` `--jobs`; `--ocr` and the other options also work in
 plain-text mode. Exit status is 0 on success and non-zero if any file failed.
 
+### Plain text to Markdown
+
+```sh
+batchocr notes.txt --to md                 # -> notes.md
+batchocr notes.txt --to md --txt-structure off      # paragraphs only
+```
+
+A `.txt` file has no fonts, so structure is guessed from how people type: a short line in capitals, `1.2 Title`, an
+underline of `====`, bullets and numbered runs, columns separated by runs of spaces (a table), indented blocks (code),
+lines wrapped at one column (joined into paragraphs; ragged lines such as an address keep their breaks). It is off unless
+you ask for it with `--to md`, and it needs nothing installed.
+
+Two promises. **The words never change**: the letters and digits of the result, in order, are the input's (a hyphen at a
+line end stays; headings get `#`, lists `-`, tables `|`); the check runs on every file and falls back to plain
+paragraphs if it ever fails. **A garbled text is not given structure**: the share of letters and digits, replacement and
+control characters, very short lines, one-letter "words" and the average word length are measured, and past a limit
+(`GARBLE_LIMITS` in `batchocr_txt.py`) the file gets paragraphs only and the rule that fired is printed
+(`--txt-structure force` skips the check). Guessing is still guessing: read the result before relying on it.
+
 ## What happens to each format
 
 | Input | Default handling | Output |

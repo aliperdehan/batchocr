@@ -22,6 +22,12 @@ What it handles:
     with <!-- Page N --> comments (--no-page-markers drops them, --page-breaks
     adds '---' rules); running headers/footers are removed from PDFs of 4+
     pages; every page is checked so no detector can swallow its text.
+  - Plain text to Markdown: a .txt file read with --to md gets headings, lists,
+    tables and code guessed from how it is typed (batchocr_txt.py), paragraphs
+    re-flowed; no dependency. Off unless you ask: --to md is the request. The
+    letters and digits never change, and a text that measures as garbled (symbol
+    soup, OCR noise, replacement characters) is given paragraphs only, with the
+    rule that fired printed (--txt-structure force/off overrides).
   - Images (.png/.jpg/.jpeg/.tif/.tiff/.bmp/.pnm): OCRed directly with
     Tesseract, no rasterisation needed. A single image is treated like a
     single-page document. A directory of page images (page1.png, page2.png,
@@ -159,7 +165,7 @@ Supplementary outputs:
   batchocr input.pdf -m
 """
 
-BATCHOCR_VERSION = "1.2.4"
+BATCHOCR_VERSION = "1.2.5"
 
 EDGE_ZONE = 0.12             # top/bottom share of a page where running headers and footers live
 MIN_PAGES_HEADER_FOOTER = 4  # repeated header/footer removal needs at least this many pages
@@ -1303,9 +1309,14 @@ def main():
                           "native-text-layer detection -- this was the old default, still the "
                           "better choice for garbled/scanned sources")
     ap.add_argument("-t", "--to", choices=["txt", "md"], default="txt",
-                     help="output format for PDFs: txt (default) or md (Markdown with headings, "
-                          "lists, tables and emphasis; needs PyMuPDF, installed separately). "
-                          "Other input types keep their usual output")
+                     help="output format for PDFs and .txt files: txt (default) or md (Markdown with headings, "
+                          "lists, tables and emphasis; a PDF needs PyMuPDF, installed separately, a .txt file "
+                          "needs nothing: see --txt-structure). Other input types keep their usual output")
+    ap.add_argument("--txt-structure", choices=["auto", "force", "off"], default="auto",
+                     help="a .txt file read with --to md: auto (default) = guess headings, lists, tables and "
+                          "code from how the text is typed, unless it measures as garbled (then paragraphs "
+                          "only, with the rule that fired); force = always guess; off = paragraphs only. The "
+                          "letters and digits never change")
     ap.add_argument("--ocr", choices=["off", "auto", "tesseract", "ocrmypdf"], default="auto",
                      help="PDF OCR policy: auto (default) = per-page hybrid; off = never OCR; "
                           "tesseract = OCR every page (same as --full-ocr); ocrmypdf = run "
@@ -1728,6 +1739,30 @@ def main():
     # --- fast, non-OCR formats first ---
     for f in direct_files + pandoc_files:
         file_started = time.monotonic()
+        if md_mode and f.suffix.lower() == ".txt":
+            # plain text to Markdown: structure guessed from how it is typed (batchocr_txt)
+            out_path = output_for(f, ".md")
+            if should_skip(out_path):
+                print(f"[skip] {f.name} already has output")
+                text = out_path.read_text(errors="replace")
+                label = out_path.name
+            else:
+                import batchocr_txt
+                result = batchocr_txt.convert(f.read_text(errors="replace"), args.txt_structure)
+                text = result.markdown + ("" if args.no_provenance else f"\n{PROVENANCE_COMMENT}\n")
+                for reason in result.reasons:
+                    print(f"[md] {f.name}: {reason}")
+                if result.garbled and not result.reasons:
+                    print(f"[md] {f.name}: kept as paragraphs")
+                if args.stats:
+                    print(f"[stats] {f.name}: {markdown_stats(text)}")
+                label = route_output(f, ".md", text)
+                print(f"[done, txt->md] {f.name} -> {label} ({len(text)} chars)"
+                      f" | time {format_duration(time.monotonic() - file_started)}")
+            manifest_entries[f] = (f.suffix.lower(), "-", len(text.split()), text[:300].replace("\n", " "), label)
+            completed_sources.append(f)
+            archive_source(f, args.archive_dir)
+            continue
         out_path = output_for(f, ".txt")
         if should_skip(out_path):
             print(f"[skip] {f.name} already has output")

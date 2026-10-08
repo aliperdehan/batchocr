@@ -25,7 +25,7 @@ batchocr = "batchocr:main"
 Source = "https://github.com/aliperdehan/batchocr"
 
 [tool.setuptools]
-py-modules = ["batchocr"]
+py-modules = ["batchocr", "batchocr_txt"]
 packages = ["m1ck4_pdfmd"]
 
 [tool.setuptools.package-data]

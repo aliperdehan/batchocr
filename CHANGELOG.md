@@ -2,6 +2,17 @@
 
 Newest first. History before 1.1.0 was not tracked.
 
+## 1.2.5 — 2026-10-08
+
+- **Plain text to Markdown**: `batchocr notes.txt --to md` writes `notes.md` with headings (capitals, `1.2 Title`,
+  underlines, `Chapter N`), bullet, numbered and lettered lists, tables from columns separated by runs of spaces, indented
+  blocks as code and paragraphs re-flowed from hard-wrapped lines (new module `batchocr_txt.py`, no dependency; off unless
+  `--to md` is given). `--txt-structure auto|force|off`.
+- Two promises, tested: the letters and digits of the output are the input's (checked on every file; plain paragraphs
+  if it fails), and a text that measures as garbled (letters and digits under 60% of the characters, replacement or control
+  characters, over 60% very short lines, one-letter words, an implausible average word length) is given paragraphs only,
+  with the rule printed. A synthetic benchmark of typed documents keeps structure recall above 97% with under 2% invented.
+
 ## 1.2.4 — 2026-10-07
 
 - Markdown output ends with `<!-- text extracted with batchocr vX.Y.Z -->`
